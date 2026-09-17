@@ -8,19 +8,24 @@
     "configurePresets": [
         {
             "name": "default",
-            "displayName": "default",
-            "description": "Default preset that are inherited by all",
-            "generator": "Ninja Multi-Config",
+            "displayName": "Shared settings",
+            "description": "Settings inherited by every preset. Uses single-config Ninja because godot-cpp v10 selects its bindings through the single-valued GODOTCPP_TARGET, and because templates/CMakeLists.txt requires CMAKE_BUILD_TYPE to be Debug or Release.",
+            "generator": "Ninja",
             "hidden": true,
             "cacheVariables": {
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/demo/addons"
+                "GODOTCPP_API_VERSION": "4.7",
+                "GODOTCPP_SYSTEM_HEADERS": "ON",
+                "GODOTCPP_ENABLE_TESTING": "OFF",
+                "GODOTCPP_WARNING_AS_ERROR": "OFF",
+                "BUILD_TESTING": "ON"
             }
         },
         {
-            "name": "windows",
-            "displayName": "64bit Windows Multi-Config",
+            "name": "windows-editor",
+            "displayName": "Windows x64 - editor",
+            "description": "For iterating inside the Godot editor. GODOTCPP_TARGET=editor is required because the camera manager reads editor viewport cameras through EditorInterface, which only exists with TOOLS_ENABLED.",
             "inherits": "default",
-            "binaryDir": "${sourceDir}/build/Windows-AMD64",
+            "binaryDir": "${sourceDir}/build/windows-editor",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -35,47 +40,28 @@
                 "strategy": "external"
             },
             "cacheVariables": {
-                "CMAKE_C_COMPILER": "cl.exe",
-                "CMAKE_CXX_COMPILER": "cl.exe"
-            }
-        },
-        {
-            "name": "windows-debug",
-            "displayName": "64bit Windows Debug",
-            "inherits": "default",
-            "binaryDir": "${sourceDir}/build/Windows-AMD64",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            },
-            "toolset": {
-                "value": "host=x64",
-                "strategy": "external"
-            },
-            "architecture": {
-                "value": "x64",
-                "strategy": "external"
-            },
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "cl.exe",
                 "CMAKE_CXX_COMPILER": "cl.exe",
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "GODOTCPP_TARGET": "editor",
+                "GODOTCPP_USE_HOT_RELOAD": "ON"
             }
         },
         {
             "name": "windows-release",
-            "displayName": "64bit Windows Release",
-            "inherits": "windows-debug",
+            "displayName": "Windows x64 - release",
+            "inherits": "windows-editor",
+            "binaryDir": "${sourceDir}/build/windows-release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "GODOTCPP_TARGET": "template_release",
+                "GODOTCPP_USE_HOT_RELOAD": "OFF"
             }
         },
         {
-            "name": "linux-debug",
-            "displayName": "64bit Linux Debug",
+            "name": "linux-editor",
+            "displayName": "Linux x64 - editor",
             "inherits": "default",
-            "binaryDir": "${sourceDir}/build/Linux-x86_64",
+            "binaryDir": "${sourceDir}/build/linux-editor",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -83,23 +69,27 @@
             },
             "cacheVariables": {
                 "CMAKE_CXX_COMPILER": "g++",
-                "CMAKE_C_COMPILER": "gcc",
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "GODOTCPP_TARGET": "editor",
+                "GODOTCPP_USE_HOT_RELOAD": "ON"
             }
         },
         {
             "name": "linux-release",
-            "displayName": "64bit Linux Release",
-            "inherits": "linux-debug",
+            "displayName": "Linux x64 - release",
+            "inherits": "linux-editor",
+            "binaryDir": "${sourceDir}/build/linux-release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "GODOTCPP_TARGET": "template_release",
+                "GODOTCPP_USE_HOT_RELOAD": "OFF"
             }
         },
         {
-            "name": "macOS-debug",
-            "displayName": "64bit macOS Debug",
+            "name": "macOS-editor",
+            "displayName": "macOS universal - editor",
             "inherits": "default",
-            "binaryDir": "${sourceDir}/build/Darwin-Universal",
+            "binaryDir": "${sourceDir}/build/macOS-editor",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -107,16 +97,76 @@
             },
             "cacheVariables": {
                 "CMAKE_CXX_COMPILER": "clang++",
-                "CMAKE_C_COMPILER": "clang",
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "GODOTCPP_TARGET": "editor",
+                "GODOTCPP_USE_HOT_RELOAD": "ON"
             }
         },
         {
             "name": "macOS-release",
-            "displayName": "64bit macOS Release",
-            "inherits": "macOS-debug",
+            "displayName": "macOS universal - release",
+            "inherits": "macOS-editor",
+            "binaryDir": "${sourceDir}/build/macOS-release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "GODOTCPP_TARGET": "template_release",
+                "GODOTCPP_USE_HOT_RELOAD": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-editor",
+            "configurePreset": "windows-editor"
+        },
+        {
+            "name": "windows-release",
+            "configurePreset": "windows-release"
+        },
+        {
+            "name": "linux-editor",
+            "configurePreset": "linux-editor"
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release"
+        },
+        {
+            "name": "macOS-editor",
+            "configurePreset": "macOS-editor"
+        },
+        {
+            "name": "macOS-release",
+            "configurePreset": "macOS-release"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "windows-editor",
+            "configurePreset": "windows-editor",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "windows-release",
+            "configurePreset": "windows-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-editor",
+            "configurePreset": "linux-editor",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release",
+            "output": {
+                "outputOnFailure": true
             }
         }
     ]

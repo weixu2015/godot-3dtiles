@@ -1,6 +1,4 @@
 [submodule "extern/godot-cpp"]
 	path = extern/godot-cpp
 	url = https://github.com/godotengine/godot-cpp.git
-[submodule "extern/cesium-native"]
-	path = extern/cesium-native
-	url = git@github.com:CesiumGS/cesium-native.git
+	branch = 10.0.0-stable

@@ -1,20 +1,19 @@
-// Copied from godot-cpp/test/src and modified.
+// SPDX-License-Identifier: Unlicense
+//
+// GDExtension entry point: registers this extension's classes with Godot's ClassDB.
 
 #include "gdextension_interface.h"
 #include "godot_cpp/core/class_db.hpp"
 #include "godot_cpp/core/defs.hpp"
 #include "godot_cpp/godot.hpp"
 
-#include "Cesium.h"
-#include "Cesium3DTileset.h"
-#include "CesiumGeoreference.h"
-#include "CesiumOriginAuthority.h"
-#include <Cesium3DTilesContent/registerAllTileContentTypes.h>
+#include "Godot3DTiles.h"
+#include "OriginAuthority.h"
 
 /// @file
 /// Register our classes with Godot.
 
-using namespace CesiumForGodot;
+using namespace tiles3d;
 
 namespace
 {
@@ -30,13 +29,15 @@ namespace
             return;
         }
 
-        godot::ClassDB::register_class<Cesium>();
+        // Types that do not depend on the 3D Tiles scheduler.
+        godot::ClassDB::register_class<Godot3DTiles>();
         godot::ClassDB::register_class<LongitudeLatitudeHeight>();
         godot::ClassDB::register_class<EarthCenteredEarthFixed>();
-        godot::ClassDB::register_class<CesiumGeoreference>();
-        godot::ClassDB::register_class<Cesium3DTileset>();
 
-        Cesium3DTilesContent::registerAllTileContentTypes();
+        // Georeference3D and Tileset3D are registered here once they exist. The 3D Tiles
+        // backend they need (scheduler + content pipeline) is phases 3 to 4 of
+        // docs/REFACTOR_PLAN.md; registering a class before its implementation would only
+        // fail class lookup at load time.
     }
 
     /// @brief Called by Godot to let us do any cleanup.

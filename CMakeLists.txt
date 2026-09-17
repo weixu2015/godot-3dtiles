@@ -26,6 +26,9 @@ if ( APPLE )
     set( CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "" )
 endif()
 
+# Unit tests for the engine-agnostic scheduling kernel (src/core).
+option( BUILD_TESTING "Build the tiles3d_core unit tests" ON )
+
 # Main project information
 project( godot-3dtiles
     LANGUAGES
@@ -33,6 +36,32 @@ project( godot-3dtiles
     VERSION
         0.0.1
 )
+
+# Install prefix defaults to the repository root, so `cmake --install` drops the built
+# library plus the generated .gdextension file into demo/addons, which is where the demo
+# project loads the extension from. This stays inside the project tree (no system path,
+# no administrator rights). Override with -DCMAKE_INSTALL_PREFIX=... to install
+# somewhere else (INSTALL_DIR below follows the prefix).
+if ( CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT )
+    set( CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}" CACHE PATH "Install prefix" FORCE )
+endif()
+
+set( INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/demo/addons" )
+message( STATUS "Install directory: ${INSTALL_DIR}")
+
+# MSVC runtime must match godot-cpp. godot-cpp (cmake/windows.cmake) forces a static
+# runtime (MultiThreaded /MT) via the CMAKE_MSVC_RUNTIME_LIBRARY cache variable, but it
+# only sets that variable inside add_subdirectory(extern) -- which runs AFTER this main
+# target is created below. If left to CMake's default, the main target captures the
+# dynamic runtime (/MDd) and linking fails with LNK2038 (RuntimeLibrary /
+# _ITERATOR_DEBUG_LEVEL mismatch against libgodot-cpp). Set it up front so every target
+# uses static /MT.
+# NOTE: use uniform "MultiThreaded" (not "MultiThreaded$<$<CONFIG:Debug>:Debug>"); the
+# latter yields /MTd in Debug, whose _ITERATOR_DEBUG_LEVEL (2) still mismatches godot-cpp's
+# /MT (0).
+if ( MSVC )
+    set( CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" )
+endif()
 
 # Create our library
 add_library( ${PROJECT_NAME} SHARED )
@@ -44,7 +73,7 @@ target_compile_features( ${PROJECT_NAME}
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE
-        /W4 /WX 
+        /W4 /WX
         /wd4100 /wd4244 /wd4267 /wd4996 /wd4828 /wd4010
         /utf-8
     )
@@ -82,21 +111,25 @@ if( NOT DEFINED CMAKE_DEBUG_POSTFIX )
     )
 endif()
 
+# ccache must be included before any target is created (the root target included), so that
+# CMAKE_CXX_COMPILER_LAUNCHER reaches every translation unit rather than only the
+# subdirectories added after it.
+include( ccache )
+
 # Warnings
 include( CompilerWarnings )
 
 # Create and include version info file from git
 include( GitVersionInfo )
 
+
+# External dependencies first: src/ links tiles3d_core against tiles3d_third_party, and the
+# extension library against godot-cpp, so those targets must already exist.
+add_subdirectory( extern )
+
 add_subdirectory( src )
 
-set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}") 
-
-# Install library, extension file, and support files in ${CMAKE_INSTALL_PREFIX}
-set( INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/demo/addons" )
-
-message( STATUS "Install directory: ${INSTALL_DIR}")
-
+# Install library, extension file, and support files in ${INSTALL_DIR}
 install( TARGETS ${PROJECT_NAME}
     LIBRARY
         DESTINATION ${INSTALL_DIR}/${LIB_DIR}
@@ -106,15 +139,11 @@ install( TARGETS ${PROJECT_NAME}
 
 add_subdirectory( templates )
 
-# ccache
-# Turns on ccache if found
-include( ccache )
+if ( BUILD_TESTING )
+    enable_testing()
+    add_subdirectory( tests )
+endif()
 
 # Formatting
 # Adds a custom target to format all the code at once
 include( ClangFormat )
-
-# External libraries
-add_subdirectory( extern )
-
-

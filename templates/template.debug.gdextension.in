@@ -1,9 +1,9 @@
 [configuration]
 entry_symbol = "GDExtensionInit"
-compatibility_minimum = 4.2
+compatibility_minimum = "4.7"
 reloadable = true
 
 [libraries]
-linux.debug.x86_64 = "res://addons/lib/Linux-x86_64/${PROJECT_NAME}-d.so"
-macos.debug = "res://addons/lib/Darwin-Universal/${PROJECT_NAME}-d.dylib"
-windows.debug.x86_64 = "res://addons/lib/Windows-AMD64/${PROJECT_NAME}-d.dll"
+linux.x86_64 = "res://addons/lib/Linux-x86_64/${PROJECT_NAME}-d.so"
+macos = "res://addons/lib/Darwin-universal/${PROJECT_NAME}-d.dylib"
+windows.x86_64 = "res://addons/lib/Windows-AMD64/${PROJECT_NAME}-d.dll"

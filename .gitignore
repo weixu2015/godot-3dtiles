@@ -5,6 +5,13 @@ CMakeLists.txt.user
 build/*
 build_release/*
 
+# in-source cmake artefacts - these were committed by accident once already
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+compile_commands.json
+
 # editors
 .vscode/*
 .vs/*
@@ -12,5 +19,17 @@ build_release/*
 # extern
 extern/*
 !extern/CMakeLists.txt
+!extern/third_party/
+!extern/third_party/**
+
+# Godot editor local state
+.godot/
+
+# WorkBuddy workspace data (project memory, project skills). Platform-managed, not
+# source; keep it out of the repository so `git add -A` cannot sweep it in.
+.workbuddy/
+
+# generated godot import/uid sidecars at the project root of the demo
+demo/addons/godot-3dtiles.gdextension.uid
 
 lib/
