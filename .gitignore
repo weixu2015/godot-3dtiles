@@ -1,5 +1,4 @@
 CMakeLists.txt.user
-.vscode/settings.json
 
 # build
 build/*
@@ -13,7 +12,6 @@ CMakeUserPresets.json
 compile_commands.json
 
 # editors
-.vscode/*
 .vs/*
 
 # extern

@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}",
+    "shell": {
+      "executable": "cmd.exe",
+      "args": ["/d", "/c"]
+    }
+  },
+  "tasks": [
+    {
+      "label": "configure",
+      "type": "shell",
+      "command": "call \"${workspaceFolder}\\scripts\\msvc_env.bat\" && cmake --preset windows-editor",
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Configure the editor build (GODOTCPP_TARGET=editor, Debug, Ninja)"
+    },
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "call \"${workspaceFolder}\\scripts\\msvc_env.bat\" && cmake --build --preset windows-editor --parallel",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "dependsOn": ["configure"],
+      "problemMatcher": ["$msCompile"],
+      "detail": "Build the extension (windows-editor)"
+    },
+    {
+      "label": "install",
+      "type": "shell",
+      "command": "cmake --install \"${workspaceFolder}\\build\\windows-editor\"",
+      "dependsOn": ["build"],
+      "detail": "Install the DLL and .gdextension into demo/addons"
+    },
+    {
+      "label": "build-install",
+      "type": "shell",
+      "dependsOn": ["configure", "build", "install"],
+      "detail": "Configure + build + install (used by the debug launch)"
+    },
+    {
+      "label": "configure-release",
+      "type": "shell",
+      "command": "call \"${workspaceFolder}\\scripts\\msvc_env.bat\" && cmake --preset windows-release",
+      "detail": "Configure the release build (template_release)"
+    },
+    {
+      "label": "release",
+      "type": "shell",
+      "command": "call \"${workspaceFolder}\\scripts\\msvc_env.bat\" && cmake --build --preset windows-release --parallel",
+      "dependsOn": ["configure-release"],
+      "problemMatcher": ["$msCompile"],
+      "detail": "Build the extension (windows-release)"
+    }
+  ]
+}

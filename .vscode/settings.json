@@ -1,0 +1,17 @@
+{
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/windows-editor/compile_commands.json",
+  "cmake.buildDirectory": "${workspaceFolder}/build/windows-editor",
+  "files.associations": {
+    "*.cpp": "cpp",
+    "*.h": "cpp"
+  },
+  "clang-format.executable": "D:/DevelopApps/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/clang-format.exe",
+  "editor.formatOnSave": true,
+  "C_Cpp.formatting": "clangFormat",
+  "C_Cpp.clang_format_style": "file",
+  "[cpp]": {
+    "editor.defaultFormatter": "xaver.clang-format"
+  },
+  "nuxt.isNuxtApp": false
+}

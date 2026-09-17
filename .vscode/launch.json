@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Point program at a Godot 4.7.x editor binary (the extension requires compatibility_minimum = "4.7").
+      // The only Godot found on this machine right now is a 4.4 custom build at D:/Develop/space/godot.
+      "name": "Debug Godot Editor (godot-3dtiles)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/Develop/space/godot/bin/godot.windows.editor.x86_64.exe",
+      "args": ["--path", "${workspaceFolder}/demo", "--editor", "--verbose"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build-install",
+      "console": "externalTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false,
+      "environment": []
+    },
+    {
+      "name": "Run Example Scene (godot-3dtiles)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/Develop/space/godot/bin/godot.windows.editor.x86_64.exe",
+      "args": ["--path", "${workspaceFolder}/demo"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build-install",
+      "console": "externalTerminal",
+      "stopAtEntry": false,
+      "justMyCode": false,
+      "environment": []
+    }
+  ]
+}
