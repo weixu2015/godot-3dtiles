@@ -29,6 +29,7 @@
 #include "godot_cpp/variant/packed_vector3_array.hpp"
 #include "godot_cpp/variant/string.hpp"
 #include "godot_cpp/variant/utility_functions.hpp"
+#include "godot_cpp/variant/variant.hpp"
 #include "godot_cpp/variant/vector2.hpp"
 
 #include <cstddef>
@@ -392,6 +393,15 @@ namespace tiles3d
                 arrays[static_cast<std::int32_t>( Mesh::ARRAY_COLOR )] = colorArray;
             }
 
+            // Godot front faces are wound clockwise, glTF/OpenGL counter-clockwise. Reverse the
+            // whole index buffer so back-face culling keeps the outer surface instead of the
+            // interior - the classic "buildings look hollow" symptom. Mirrors the legacy
+            // GodotPrepareRendererResources::loadPrimitive path (indices_.reverse()).
+            if ( !indices.empty() )
+            {
+                std::reverse( indices.begin(), indices.end() );
+            }
+
             if ( !indices.empty() )
             {
                 PackedInt32Array indexArray;
@@ -451,6 +461,30 @@ namespace tiles3d
                     {
                         material =
                             &model.materials[static_cast<std::size_t>( primitive.material )];
+                    }
+
+                    // Diagnostic. Whether shading can even show a lighting error depends on
+                    // these flags: an unlit primitive ignores normals completely (unshaded
+                    // shading, and buildSurfaceArrays skips generating them), so "convex
+                    // geometry looks concave" cannot be a normal problem there - it points
+                    // at winding / backface culling instead.
+                    {
+                        static int reportedPrimitives = 0;
+                        if ( reportedPrimitives < 3 )
+                        {
+                            ++reportedPrimitives;
+                            godot::UtilityFunctions::print( godot::vformat(
+                                "[Tileset3D] prim: verts=%d indices=%d hasNormal=%d unlit=%d "
+                                "doubleSided=%d alphaMode=%d",
+                                static_cast<int>( primitive.positions.size() / 3u ),
+                                static_cast<int>( primitive.indices.size() ),
+                                primitive.normals.empty() ? 0 : 1,
+                                material != nullptr && material->unlit ? 1 : 0,
+                                material != nullptr && material->doubleSided ? 1 : 0,
+                                material != nullptr
+                                    ? static_cast<int>( material->alphaMode )
+                                    : -1 ) );
+                        }
                     }
 
                     godot::Array arrays;

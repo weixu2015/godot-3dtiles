@@ -17,6 +17,13 @@
 #include "godot_cpp/classes/array_mesh.hpp"
 #include "godot_cpp/classes/base_material3d.hpp"
 #include "godot_cpp/classes/camera3d.hpp"
+// EditorInterface / SubViewport are only linked in an editor build (see the
+// TILES3D_EDITOR_TARGET note in the top level CMakeLists).
+#ifdef TILES3D_EDITOR_TARGET
+#include "godot_cpp/classes/editor_interface.hpp"
+#include "godot_cpp/classes/sub_viewport.hpp"
+#endif
+#include "godot_cpp/classes/engine.hpp"
 #include "godot_cpp/classes/file_access.hpp"
 #include "godot_cpp/classes/mesh.hpp"
 #include "godot_cpp/classes/standard_material3d.hpp"
@@ -726,10 +733,38 @@ namespace tiles3d
         ViewState view;
 
         godot::Viewport *viewport = get_viewport();
+
         if ( viewport == nullptr )
         {
             return view;
         }
+
+        view.viewportHeight = static_cast<double>( viewport->get_visible_rect().size.y );
+
+#ifdef TILES3D_EDITOR_TARGET
+        // Inside the editor the camera the user actually flies is the editor viewport's own
+        // camera. A Camera3D placed in the scene is a *static* node that does not move with
+        // it and is picked up when the project is run - and get_viewport()->get_camera_3d()
+        // does return it here, so a "use the editor camera only when null" fallback would
+        // never reach it. The traversal would then keep reading a camera that never moves
+        // and LOD would look completely dead. Prefer the editor camera in the editor.
+        //
+        // Height: SubViewport::get_size() is the real pixel size. Viewport::get_visible_rect()
+        // returns a rect in the parent's coordinate space and measured 2.0 for the editor
+        // viewport, which scales the screen space error down by ~400x and stops all
+        // refinement dead (rootSSE 2.19 against a threshold of 16).
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine != nullptr && engine->is_editor_hint() )
+        {
+            godot::SubViewport *editorViewport =
+                godot::EditorInterface::get_singleton()->get_editor_viewport_3d();
+            if ( editorViewport != nullptr && editorViewport->get_camera_3d() != nullptr )
+            {
+                viewport = editorViewport;
+                view.viewportHeight = static_cast<double>( editorViewport->get_size().y );
+            }
+        }
+#endif
 
         godot::Camera3D *camera = viewport->get_camera_3d();
         if ( camera == nullptr )
@@ -740,7 +775,6 @@ namespace tiles3d
         // The traversal works in this node's local space, so the camera position is brought
         // into it rather than the tiles into world space.
         view.position = fromGodotVector( to_local( camera->get_global_transform().origin ) );
-        view.viewportHeight = static_cast<double>( viewport->get_visible_rect().size.y );
         view.fovDegrees = static_cast<double>( camera->get_fov() );
         return view;
     }
@@ -774,6 +808,41 @@ namespace tiles3d
         sync_content_visibility();
 
         last_rendered_count = render_list.size();
+
+        // LOD diagnostic. Fires when the selected set changes, plus at most once every
+        // kReportInterval frames so a parked camera does not flood the output.
+        //
+        // The earlier variant printed only the first 5 frames, which is useless: at that
+        // point nothing has loaded yet, so every line read "loaded=1 renderList=1" no
+        // matter whether refinement works. Printing the three inputs that drive the screen
+        // space error (camera position, viewport height, fov) alongside the resulting SSE
+        // is what actually separates "no camera", "camera too far" and "SSE wrong".
+        {
+            static std::uint64_t lastReportFrame = 0;
+            static std::size_t lastReportedRendered = 0;
+            constexpr std::uint64_t kReportInterval = 60;
+
+            if ( last_rendered_count != lastReportedRendered ||
+                 frame_number - lastReportFrame >= kReportInterval )
+            {
+                lastReportFrame = frame_number;
+                lastReportedRendered = last_rendered_count;
+
+                UtilityFunctions::print( godot::vformat(
+                    "[Tileset3D] LOD f=%d cam=(%s,%s,%s) vpH=%s fov=%s rootSSE=%s maxSSE=%s "
+                    "render=%d loaded=%d",
+                    static_cast<int>( frame_number ),
+                    godot::String::num( view.position.x, 1 ),
+                    godot::String::num( view.position.y, 1 ),
+                    godot::String::num( view.position.z, 1 ),
+                    godot::String::num( view.viewportHeight, 1 ),
+                    godot::String::num( view.fovDegrees, 1 ),
+                    godot::String::num( root->screenSpaceError, 2 ),
+                    godot::String::num( maximum_screen_space_error, 1 ),
+                    static_cast<int>( render_list.size() ),
+                    static_cast<int>( loaded_tiles.size() ) ) );
+            }
+        }
     }
 
     void Tileset3D::traverse_tile( core::Tile &tile, const math::Mat4 &parent_world,
@@ -813,11 +882,18 @@ namespace tiles3d
         const bool hasContentUri = tile.content.has_value();
         const bool contentReady = tile.contentState == core::ContentState::Ready;
 
+        // Ported line for line from the reference scheduler
+        // (web-spatial-examples/.../threeDTiles/index.ts:1801-1815). The reference is the
+        // authority for traversal semantics, not Cesium - and even where the reference
+        // deliberately adopted Cesium/NASA behaviour, that decision is recorded *in the
+        // reference*, so cite the reference and keep the pointer to it.
+
         // A tile that declares no content and is not ready must keep refining, otherwise it
-        // would be a dead end with nothing to show.
+        // would be a dead end with nothing to show. (reference: "对齐 Cesium")
         const bool forceRefine = !contentReady && !hasContentUri && tile.geometricError > 0.0;
 
-        // NASA's canUnconditionallyRefine: when a dataset's geometric errors are not
+        // The reference aligned this rule with NASA's canUnconditionallyRefine
+        // (traverseFunctions.js:85-104). When a dataset's geometric errors are not
         // monotonically decreasing, a parent passing the SSE test says nothing about its
         // children, so refinement continues down to the level where the error converges.
         const bool unconditionallyRefine =
@@ -992,8 +1068,6 @@ namespace tiles3d
             }
         }
 
-        int shown = 0;
-
         for ( core::Tile *tile : render_list )
         {
             if ( tile->contentUserData == nullptr ||
@@ -1004,28 +1078,12 @@ namespace tiles3d
 
             auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
             node->set_visible( true );
-            ++shown;
 
             // Re-apply the world matrix: cheap, and it keeps content correct if the
             // georeference or this node moves after the tile was loaded.
             if ( tile->worldMatrix.has_value() )
             {
                 node->set_transform( toGodotTransform( *tile->worldMatrix ) );
-            }
-        }
-
-        // Diagnostic: separates "nothing loaded", "loaded but never selected for
-        // rendering" and "selected but not ready", which all look identical ("no mesh")
-        // from the viewport.
-        {
-            static int reported = 0;
-            if ( reported < 5 )
-            {
-                ++reported;
-                UtilityFunctions::print( godot::vformat(
-                    "[Tileset3D] sync: loaded=%d renderList=%d shown=%d",
-                    static_cast<int>( loaded_tiles.size() ),
-                    static_cast<int>( render_list.size() ), shown ) );
             }
         }
 

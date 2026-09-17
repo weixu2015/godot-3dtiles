@@ -66,6 +66,15 @@ endif()
 # Create our library
 add_library( ${PROJECT_NAME} SHARED )
 
+# EditorInterface only exists in an editor build. godot-cpp's *CMake* build does NOT
+# define TOOLS_ENABLED - only its SCons build does (tools/godotcpp.py:484); verified by
+# grepping the generated build.ninja, which has zero hits. So the editor-only code path
+# is gated on our own define, derived from the same variable that selects godot-cpp's
+# target (set by the presets).
+if ( GODOTCPP_TARGET STREQUAL "editor" )
+    target_compile_definitions( ${PROJECT_NAME} PRIVATE TILES3D_EDITOR_TARGET=1 )
+endif()
+
 target_compile_features( ${PROJECT_NAME}
     PRIVATE
         cxx_std_20

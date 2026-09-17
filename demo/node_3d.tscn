@@ -9,7 +9,11 @@ ecef_z = 4081329.721623689
 
 [node name="Georeference3D" type="Georeference3D" parent="." unique_id=58985776]
 origin_authority = SubResource("EarthCenteredEarthFixed_anchor")
-transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+; Tile space is Z-up, Godot is Y-up. This must map local +Z -> world +Y, and to stay
+; right handed local +Y -> world -Z. The previous matrix was its transpose (it mapped
+; local +Z -> world -Y), which rendered the whole tileset upside down: raised buildings
+; pointed down and read as dents.
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
 
 [node name="Tileset3D" type="Tileset3D" parent="Georeference3D" unique_id=1444355910]
 url = "D:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
