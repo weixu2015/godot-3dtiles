@@ -164,10 +164,10 @@ namespace tiles3d::core
             else if ( const auto extensionsIt = json.find( "extensions" );
                       extensionsIt != json.end() && extensionsIt->is_object() )
             {
-                if ( const auto it = extensionsIt->find( "3DTILES_implicit_tiling" );
-                     it != extensionsIt->end() && it->is_object() )
+                if ( const auto implicitIt = extensionsIt->find( "3DTILES_implicit_tiling" );
+                     implicitIt != extensionsIt->end() && implicitIt->is_object() )
                 {
-                    implicitJson = &( *it );
+                    implicitJson = &( *implicitIt );
                 }
             }
 

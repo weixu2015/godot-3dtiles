@@ -6,6 +6,7 @@
 #include <doctest/doctest.h>
 
 #include "math/GeoMath.h"
+#include "math/Mat4.h"
 
 #include <glm/geometric.hpp>
 
@@ -180,4 +181,103 @@ TEST_CASE( "regionToEcefObb straddling the equator uses latitude 0 as plane cent
     // makes the order of the half axes worth asserting.
     CHECK( glm::length( box.halfAxes[2] ) < glm::length( box.halfAxes[0] ) );
     CHECK( glm::length( box.halfAxes[2] ) < 20000.0 );
+}
+
+// ---------------------------------------------------------------------------
+// eastNorthUpToFixedFrame
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    /// An ENU frame must be a rigid transform: unit, mutually orthogonal axes.
+    void checkOrthonormalFrame( const Mat4 &m )
+    {
+        const Vec3 x( m[0] );
+        const Vec3 y( m[1] );
+        const Vec3 z( m[2] );
+
+        CHECK( glm::length( x ) == doctest::Approx( 1.0 ).epsilon( 1e-12 ) );
+        CHECK( glm::length( y ) == doctest::Approx( 1.0 ).epsilon( 1e-12 ) );
+        CHECK( glm::length( z ) == doctest::Approx( 1.0 ).epsilon( 1e-12 ) );
+
+        CHECK( std::abs( glm::dot( x, y ) ) < 1e-12 );
+        CHECK( std::abs( glm::dot( y, z ) ) < 1e-12 );
+        CHECK( std::abs( glm::dot( z, x ) ) < 1e-12 );
+    }
+
+    /// ECEF anchor taken from demo/node_3d.tscn; it is also the 1.1 dataset's root
+    /// transform translation.
+    const Vec3 kAnchorEcef( 1216362.1722084847, -4736326.03634736, 4081377.4333987297 );
+} // namespace
+
+TEST_CASE( "eastNorthUpToFixedFrame builds the textbook frame at the equator" )
+{
+    const Mat4 frame = eastNorthUpToFixedFrame( Vec3( kWgs84SemiMajorAxis, 0.0, 0.0 ) );
+
+    // At longitude 0 the surface normal is +X, so up is +X, east is +Y and north is +Z.
+    CHECK( frame[0][1] == doctest::Approx( 1.0 ) ); // column 0 = east  = +Y
+    CHECK( frame[1][2] == doctest::Approx( 1.0 ) ); // column 1 = north = +Z
+    CHECK( frame[2][0] == doctest::Approx( 1.0 ) ); // column 2 = up    = +X
+
+    CHECK( frame[3][0] == doctest::Approx( kWgs84SemiMajorAxis ) );
+    CHECK( frame[3][3] == 1.0 );
+
+    checkOrthonormalFrame( frame );
+}
+
+TEST_CASE( "eastNorthUpToFixedFrame is orthonormal and invertible at the demo anchor" )
+{
+    const Mat4 frame = eastNorthUpToFixedFrame( kAnchorEcef );
+
+    checkOrthonormalFrame( frame );
+
+    // The translation is the origin itself.
+    CHECK( frame[3][0] == doctest::Approx( kAnchorEcef.x ).epsilon( 1e-15 ) );
+    CHECK( frame[3][1] == doctest::Approx( kAnchorEcef.y ).epsilon( 1e-15 ) );
+    CHECK( frame[3][2] == doctest::Approx( kAnchorEcef.z ).epsilon( 1e-15 ) );
+
+    // Round trip. Compared with an absolute bound: doctest's Approx only has a relative
+    // epsilon, which cannot express "close to zero".
+    const Mat4 product = multiply( invert( frame ), frame );
+    for ( int column = 0; column < 4; ++column )
+    {
+        for ( int row = 0; row < 4; ++row )
+        {
+            const double expected = ( column == row ) ? 1.0 : 0.0;
+            CHECK( std::abs( product[column][row] - expected ) < 1e-8 );
+        }
+    }
+}
+
+TEST_CASE( "eastNorthUpToFixedFrame maps local axes to east, north and up" )
+{
+    const Mat4 frame = eastNorthUpToFixedFrame( kAnchorEcef );
+
+    // Directions (w = 0) carry no translation, so they avoid the catastrophic cancellation
+    // that subtracting two ECEF-magnitude positions would introduce. That keeps these
+    // assertions at machine precision. An earlier version of this test transformed points
+    // and then subtracted the anchor: with positions around 6.4e6 m the difference has an
+    // absolute floor of ~1.4e-9 m, which made even a 1e-12 relative tolerance unattainable.
+    const Vec3 eastDir = transformDirection( frame, Vec3( 1.0, 0.0, 0.0 ) );
+    const Vec3 northDir = transformDirection( frame, Vec3( 0.0, 1.0, 0.0 ) );
+    const Vec3 upDir = transformDirection( frame, Vec3( 0.0, 0.0, 1.0 ) );
+
+    CHECK( glm::length( eastDir ) == doctest::Approx( 1.0 ).epsilon( 1e-14 ) );
+    CHECK( glm::length( northDir ) == doctest::Approx( 1.0 ).epsilon( 1e-14 ) );
+    CHECK( glm::length( upDir ) == doctest::Approx( 1.0 ).epsilon( 1e-14 ) );
+
+    // The three local axes must come out mutually orthogonal.
+    CHECK( std::abs( glm::dot( eastDir, northDir ) ) < 1e-14 );
+    CHECK( std::abs( glm::dot( eastDir, upDir ) ) < 1e-14 );
+    CHECK( std::abs( glm::dot( northDir, upDir ) ) < 1e-14 );
+
+    // "up" must agree with the geodetic surface normal, which for an ECEF anchor is its own
+    // direction.
+    CHECK( std::abs( glm::dot( upDir, glm::normalize( kAnchorEcef ) ) ) ==
+           doctest::Approx( 1.0 ).epsilon( 1e-14 ) );
+
+    // Point mapping: a local step of 1500 m along +Z lands 1500 m from the anchor. Checked
+    // with an absolute bound (a micron) because of the cancellation floor described above.
+    const Vec3 raised = transformPoint( frame, Vec3( 0.0, 0.0, 1500.0 ) );
+    CHECK( std::abs( glm::length( raised - kAnchorEcef ) - 1500.0 ) < 1e-6 );
 }

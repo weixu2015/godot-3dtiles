@@ -154,6 +154,33 @@ namespace tiles3d::core
         /// Accumulated world matrix from the last traversal. Unset before the first one.
         std::optional<math::Mat4> worldMatrix;
 
+        // ------------------------------------------------------------------
+        // Traversal scratch. Written on every visit by the scheduler; meaningless between
+        // traversals. Kept on the tile rather than in a side table because the scheduler
+        // reads them per tile per frame.
+        // ------------------------------------------------------------------
+
+        /// Whether the last traversal selected this tile for rendering.
+        bool visible = false;
+
+        /// Screen space error computed on the last visit.
+        double screenSpaceError = 0.0;
+
+        /// Camera to bounding volume surface distance from the last visit.
+        double distanceToCamera = 0.0;
+
+        /// Bounding volume radius in world units, i.e. including the world matrix scale.
+        double worldRadius = 0.0;
+
+        /// Frame number of the last visit. Used to cancel requests for tiles that have left
+        /// the view, and to protect recently seen tiles from eviction.
+        std::int64_t touchedFrame = -1;
+
+        /// Opaque slot for the embedder. The Godot layer stores the Node3D it built for this
+        /// tile's content here. The kernel never dereferences it - that is what keeps this
+        /// layer engine agnostic - and whoever sets it owns it.
+        void *contentUserData = nullptr;
+
         ContentState contentState = ContentState::Unloaded;
 
         /// Bytes downloaded for this tile's content, for the memory budget.

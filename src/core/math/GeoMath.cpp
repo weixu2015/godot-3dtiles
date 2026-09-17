@@ -181,4 +181,20 @@ namespace tiles3d::math
         return result;
     }
 
+    Mat4 eastNorthUpToFixedFrame( const Vec3 &originEcef )
+    {
+        const Vec3 up = normalizeSafe( originEcef );
+        const Vec3 east = normalizeSafe( glm::cross( Vec3( 0.0, 0.0, 1.0 ), up ) );
+        const Vec3 north = glm::cross( up, east );
+
+        // Columns are the frame axes; column 3 is the origin. Built explicitly rather than
+        // via identity() so this file does not need Mat4.h.
+        Mat4 frame;
+        frame[0] = Vec4( east, 0.0 );
+        frame[1] = Vec4( north, 0.0 );
+        frame[2] = Vec4( up, 0.0 );
+        frame[3] = Vec4( originEcef, 1.0 );
+        return frame;
+    }
+
 } // namespace tiles3d::math

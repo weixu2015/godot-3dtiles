@@ -135,12 +135,23 @@ modelMatrix = inverse(root.transform)          // computeModelMatrix()
 
 即把整个数据集平移/旋转到**数据集原点**。这么做不是审美偏好，而是**精度刚需**：Godot 的 `Vector3`/`real_t` 默认 float32，在 ECEF 量级（6.4e6 m）下分辨率仅约 0.5 m，地形与摄影测量会直接抖散。
 
-**已确认方案**：
+**已确认方案**（公式已于 2026-09-17 修正，见下）：
 
 ```
-R  := Georeference3D 的本地坐标系（LHCS 的 local 端）
-modelMatrix = localToEcef⁻¹ · inverse(root.transform)
+R  := Georeference3D 的本地坐标系（LHCS 的 local 端，Z-up ENU）
+modelMatrix = localToEcef⁻¹
 ```
+
+> ⚠️ **更正**：本节原写作 `modelMatrix = localToEcef⁻¹ · inverse(root.transform)`，**是错的**。
+> 调度器的 `worldMatrix` 链本身就是从 `rootTransform` 开始逐级累积的（`modelMatrix · rootTransform · t₁ · t₂ · …`），所以再乘一个 `inverse(root.transform)` 会把它抵消掉，等于**丢弃 rootTransform**——对带旋转的 rootTransform（真实数据集都是）会把数据集摆错位置。
+>
+> 正确形式是**只乘 `localToEcef⁻¹`**，于是：
+> ```
+> root.worldMatrix = localToEcef⁻¹ · rootTransform
+> ```
+> 把 georeference 原点设在数据集的 ECEF 位置上，这个式子就退化为**纯旋转**（≈单位阵），瓦片坐标落在原点附近——这正是让 Godot 的 float32 `Transform3D` 保持精度的关键。
+>
+> **实测验证**（`D:\GISData\3D Tiles\1.0\Photogrammetry`）：其 root transform 的第三列 = `(0.1904, -0.7415, 0.6433)`，而 `normalize(rootTransform.translation)` ≈ `(0.1905, -0.7418, 0.6392)` —— root transform 确实是 ENU→ECEF 帧，吻合到千分位。`demo/node_3d.tscn` 的 georeference 原点已按该 root transform 的平移精确设定。
 
 - 瓦片 BV 与内容一律表达在 **R** 中，直接挂在 `Tileset3D` 节点下；
 - 相机由 Godot 世界变换到 R：`camera_R = godotWorldToTileset · camera_godot`（`CameraManager` 现状已具备该能力，**去掉** `localPositionToEcef` 那一步）；
@@ -515,7 +526,7 @@ rg -n 'cesium-native' --glob '!docs/**' . && exit 1
 | # | 决策点 | 结论 | 日期 |
 |---|---|---|---|
 | D-1 | 坐标系方案 | **方案 A**：保留地理参考节点，`modelMatrix = localToEcef⁻¹ · inverse(root.transform)` | 2026-09-16 |
-| D-2 | glTF 内容装配路线 | **待 Spike S1 裁决**（倾向 `GLTFDocument`） | 2026-09-16 |
+| D-2 | glTF 内容装配路线 | **已定为 Godot `GLTFDocument`**（§16.2）。Spike S1 由「裁决」降级为「验证」 | 2026-09-17 |
 | D-3 | 第三方依赖（glm / nlohmann_json / doctest / WorkerThreadPool） | **采纳** | 2026-09-16 |
 | D-4 | 类名与 API | **彻底去 Cesium 命名**，同步迁移 `node_3d.tscn`（§7） | 2026-09-16 |
 | D-5 | 功能范围 | **按 §2.D5**，不做 pnts/i3dm/cmpt/样式引擎/全局优先级调度 | 2026-09-16 |
@@ -526,6 +537,7 @@ rg -n 'cesium-native' --glob '!docs/**' . && exit 1
 | D-10 | Hot reload | 默认 **OFF**（`reloadable = false`）；旧变量 `GODOT_ENABLE_HOT_RELOAD` 在 v10 中已失效，属修复而非回退 | 2026-09-16 |
 | D-11 | `src/core/` 是否使用 C++ 异常 | **完全不用**。前置条件违反用 `assert` + 定义明确的兜底返回 | 2026-09-17 |
 | D-12 | 单测框架用法 | 只用 doctest 支持的断言；**`doctest::Approx` 没有 `margin()`**（那是 Catch2 的），近零比较一律写显式绝对差 | 2026-09-17 |
+| D-13 | glTF 内容装配路线（**反转 D-2**） | **改选自建装配**（原 §2.D2 选项 B）：`GltfReader`（core）+ 手工组装 `MeshInstance3D`/`ArrayMesh`/`StandardMaterial3D`，`GLTFDocument` 整条路径删除（§17.4） | 2026-09-17 |
 
 **D-11 的理由**：Godot 自身以禁用 C++ 异常的方式构建；godot-cpp 的默认 `GODOTCPP_DISABLE_EXCEPTIONS=ON` 会给消费者加 `_HAS_EXCEPTIONS=0`。在这条链接链上的库靠 `throw` 表达前置条件是隐患——异常穿过不启用异常编译的代码是 UB 级风险。而这些前置条件违反（非 box 做细分、level 为负）本质是**调用方编程错误**，`assert` 才是对的工具。附带收益：doctest 的 `CHECK_THROWS_*` 不再需要，`/EHsc` 在不在都无所谓，测试从此不依赖 MSVC 异常开关。
 
@@ -1082,6 +1094,267 @@ rg -n '#include\s+"(math|tiles|implicit|content|net)/' src/*.h src/*.cpp && exit
 
 在那之前，拆分只有成本没有收益。
 
+## 15. Godot 节点暴露（可在编辑器中测试）
+
+### 15.1 本阶段交付
+
+| 文件 | 内容 |
+|---|---|
+| `src/core/math/GeoMath.{h,cpp}` | 新增 `eastNorthUpToFixedFrame`（ENU→ECEF 帧），`tests/test_geomath.cpp` 加 3 个用例（赤道课本帧、锚点处正交性与往返求逆、局部轴语义） |
+| `src/Georeference3D.{h,cpp}` | `Node3D`；`origin_authority`（LLH 或 ECEF 资源）→ `local_to_ecef()` / `ecef_to_local()`，懒计算 + 缓存；监听资源信号自动刷新 |
+| `src/Tileset3D.{h,cpp}` | `Node3D`；`url` 属性 → 读文件 → core 解析 → `convertRegionBoundingVolumes` → **把瓦片包围盒画成线框**；统计属性与 `dump_tree()` |
+| `src/RegisterExtension.cpp` | 注册 `Georeference3D` / `Tileset3D` |
+| `demo/node_3d.tscn` | 迁移为 `Georeference3D` + `Tileset3D`（指向 1.0 数据集） |
+
+### 15.2 为什么先画线框而不是先渲染内容
+
+内容渲染（b3dm → glTF → Godot 节点）需要 Phase 3 的遍历调度器与 Phase 4 的内容管线。而**线框不依赖任何内容管线**，却能一次性验证整条帧链：
+
+1. 文件读取与 JSON 解析是否成立
+2. 瓦片树与 `refine` 继承是否正确（1.0 数据集全文件只有根写了 REPLACE）
+3. `regionConvert` 是否执行（本例无 region，属未覆盖路径）
+4. `modelMatrix` 与 `worldMatrix` 累积是否让数据集落在原点附近
+5. 局部坐标系（Z-up ENU）经 georeference 节点的 Z-up→Y-up 旋转后，在 Godot 里朝向是否正确
+
+这是**成本最低的可观测性投入**。按深度着色（`Color::from_hsv(0.11 × depth, …)`）让 LOD 层级一眼可辨。
+
+### 15.3 编辑器里怎么用
+
+1. 打开 `demo/` 工程，场景 `node_3d.tscn`
+2. 选中 `Tileset3D` 节点 → 按 `F` 聚焦（线框在原点附近，约 566 m × 531 m × 41 m）
+3. 输出面板会打印一行加载摘要：
+   `[Tileset3D] loaded '…': version=1.0 tiles=374 maxDepth=N rootGE=777.242 georeferenced=yes`
+4. 想看树结构：在脚本或编辑器控制台调用 `$Tileset3D.dump_tree(3)`
+5. 改 `url` 会**自动重载**（`set_url` 在 `is_inside_tree()` 时触发 `reload`）；也可直接调 `reload()`
+
+**换数据集前注意**：`url` 指向 1.1 数据集只会解析出根瓦片（隐式瓦片需要 Phase 2b 的 subtree 读取器）。同时**应把 georeference 的 ECEF 原点改成该数据集 root transform 的平移值**，否则数据集会偏离原点、坐标变大。
+
+### 15.4 节点 API
+
+| 类型 | 成员 |
+|---|---|
+| `Georeference3D` | 属性 `origin_authority`（`LongitudeLatitudeHeight` / `EarthCenteredEarthFixed`）、`scale`；方法 `refresh()`；信号 `georeference_changed` |
+| `Tileset3D` | 属性 `url`、`maximum_screen_space_error`（**本阶段仅存储，Phase 3 才消费**）、`debug_show_bounding_volume`、`debug_bounding_volume_scale`；方法 `load()` / `reload()` / `unload()` / `dump_tree(max_depth)`；只读 `get_tile_count()` / `get_maximum_depth()` / `get_asset_version()` / `get_root_geometric_error()` / `get_last_error()` / `is_placed_by_georeference()`；信号 `tileset_loaded` / `load_failed(reason)` |
+
+**无 georeference 父节点时的回落**：`modelMatrix = inverse(root.transform)`（参考实现的做法），数据集居中在原点但**不在地球上的正确位置**。加载摘要里的 `georeferenced=no` 就是这条路径。
+
+### 15.5 godot-cpp 10.0.0 的 API 陷阱（本次实测踩到，勿再猜）
+
+写节点代码时**不要凭记忆写 godot-cpp 的符号**，先 grep 头文件。本轮踩到的四处：
+
+| 误写 | 正确 | 说明 |
+|---|---|---|
+| `#include "godot_cpp/classes/base_material_3d.hpp"` | **`base_material3d.hpp`** | 类名 `BaseMaterial3D` 对应的文件名**数字前无下划线**；`standard_material3d.hpp` 同理 |
+| `material->set_vertex_color_use_as_albedo(true)` | `material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true)` | Godot 把这些 property 归到 `set_flag(Flags, bool)` 下，没有逐属性的 setter |
+| 以为 `memnew` 在 `namespace godot` 里 | 它是**宏**（`memory.hpp:133`），展开为 `::godot::_post_initialize(new (DefaultAllocator{}) …)` | 无需限定命名空间 |
+| 以为 `utility_functions.hpp` 是手写头 | 它在**生成目录** `gen/include/godot_cpp/variant/utility_functions.hpp` | v10 起手写头在 `extern/godot-cpp/include/`，生成头在 `build/<preset>/extern/godot-cpp/gen/include/`；`vformat` 声明在 `variant/variant.hpp:353` |
+
+**通用做法**：`Godot3DTiles`/`Georeference3D` 这类节点用到的枚举与签名，一律 grep `build/windows-editor/extern/godot-cpp/gen/include/godot_cpp/classes/<snake_case>.hpp` 确认后再写。这比编译一轮快得多。
+
 ---
 
-*本计划基于对两个仓库的完整源码阅读：`godot-3dtiles/src` 全量逐函数核对 + 参考实现 `index.ts` 结构映射 + 6 个 spec 文件 + 2 份设计文档；并在本机实测了工具链、版本、网络可达性与编译测试（§11–§14）。*
+## 16. 内容管线（Phase 2c + Phase 4 前半）
+
+线框验证帧链之后，用户问「怎么看不到瓦片」——因为当时**没有任何读 `.b3dm` 的代码路径**。本节交付内容管线的前两块，第三块（遍历调度）见 §16.4。
+
+### 16.1 Phase 2c：`B3dmParser`
+
+`src/core/content/B3dmParser.{h,cpp}` + `tests/test_b3dm_parser.cpp`（6 个用例）。
+
+读参考实现（`index.ts:748-816`）后照实实现，并纠正了我此前的一个**错误猜想**：我原本以为参考实现只累加 JSON 表长度、会漏掉二进制表长度——**实际它是规范的**（`offset` 里同时加了 `featureTableBinaryByteLength` 与 `batchTableBinaryByteLength`，再做 8 字节对齐）。照此实现。
+
+与参考实现的两处**有意差异**：
+
+| 项 | 参考实现 | 本项目 | 理由 |
+|---|---|---|---|
+| GLB 返回方式 | `buffer.slice()` 复制一份 | 返回 `glbOffset` / `glbLength` | 大瓦片不做无谓复制；调用方在需要 `PackedByteArray` 时再切 |
+| 越界校验 | 信任头部 `byteLength` | 校验 `byteLength <= size` 及各表边界 | 参考实现对截断的缓冲会切出越界区间；这里把静默 OOB 变成明确报错 |
+
+保留的参考语义：magic 必须 `b3dm`、`version` 必须为 1、`batchTableJson` 在无 batch table 时为空、`RTC_CENTER` 与 `BATCH_LENGTH` 从 feature table JSON 读取。
+
+### 16.2 D-2 定案：内容装配走 Godot `GLTFDocument`
+
+**不再需要 Spike S1 来「裁决」，直接定为方案 A。** 理由：
+
+1. **它已经把 1306 行手工装配要解决的问题全部解决了。** 原 `GodotPrepareRendererResources.cpp` 的绝大部分工作量是在重实现 glTF 导入器已有的能力（材质映射、sampler、UV、mipmap、sRGB），且在其中引入了 §0.4 的 9 项缺陷。
+2. **零新增原生依赖。** 方案 B 要引入 `cgltf`/`tinygltf` + `draco` + `basisu`，而 Godot 已自带 Draco 与 Basis/KTX2。
+3. **它产出的是标准 `Node3D`/`MeshInstance3D`**，直接接入 Godot 渲染管线（阴影、GI、标准材质），而自建 `ArrayMesh` 需要自己对齐这一切。
+4. 当初列为门槛的「主线程耗时」问题，靠 §16.3 的每帧预算处理，不需要靠"在 worker 线程建 mesh"来回避。
+
+**Spike S1 的定位随之改变**：从「决定 A 还是 B」降级为**验证 A 的覆盖率**——具体是第 3 条门槛（fixture 能否正确出图，Draco / KTX2 是否正常）与第 4 条（主线程耗时是否可接受）。若验证失败再回退到 B/混合，届时 §5 的其余门槛仍适用。
+
+### 16.3 交付内容
+
+| 文件 | 内容 |
+|---|---|
+| `src/core/content/B3dmParser.{h,cpp}` | b3dm 头 + feature/batch table + 内嵌 GLB 定位；无异常，错误经 `error` 返回 |
+| `tests/test_b3dm_parser.cpp` | 6 用例：正常解析、无 batch table、8 字节对齐、外来 magic、非法版本、截断缓冲 |
+| `src/GodotMathConvert.h` | **double→float 的唯一转换点**：`toGodotVector` / `toGodotTransform`。`Tileset3D.cpp` 里的局部副本已删除，两处消费方共用 |
+| `src/ContentFactory.{h,cpp}` | 容器识别（b3dm / 二进制 glTF）→ `GLTFDocument` → `Node3D`；上轴校正与 `RTC_CENTER` 的放置 |
+
+**变换约定（关键，容易搞错）**：
+
+```
+wrapper.transform  = worldMatrix                        // 瓦片局部 → 渲染帧 R
+gltfRoot.transform = rotationX(+90°) + origin=RTC_CENTER
+```
+
+- `rotationX(+90°)` 是 glTF 的 Y-up → 瓦片 Z-up 校正，**只作用于内容，绝不作用于包围盒**
+- `RTC_CENTER` 是**位置分量**，因此不随上轴校正旋转——它定义在瓦片坐标系里，所以是"在旋转之外合成"而不是"被旋转带动"。参考实现（`premultiply` 后再设 `position`）正是这个顺序
+- 用一层 wrapper 承载 `worldMatrix`，glTF 根承载校正+RTC。这样可见性切换与释放都只针对 wrapper，也避免了把一个含 RTC 的变换提前合成进 `worldMatrix`
+
+`GLTFDocument` 的 API（已 grep 生成头确认）：
+```cpp
+Error append_from_buffer( const PackedByteArray &bytes, const String &basePath, const Ref<GLTFState> &state, uint32_t flags = 0 );
+Node *generate_scene( const Ref<GLTFState> &state, float bakeFps = 30, bool trimming = false, bool removeImmutableTracks = true );
+```
+
+### 16.4 遍历调度（已交付）
+
+`Tileset3D::traverse_tile` **逐条移植**自参考实现 `index.ts:1699-1940`。动手前先读了源码——下面这些语义**全部不能凭直觉发明**，其中两条直接推翻了我事前的设想：
+
+| 规则 | 含义 |
+|---|---|
+| `refines = hasRenderableContent` | REPLACE 下，父级**只有自身内容已就绪**时才可能继续渲染 |
+| 子级"有内容但未就绪" → `refines = false` | **父级回退渲染，覆盖加载期间的空洞**（这就是我此前不确定的那条边界语义） |
+| 无可见子级 → `refines = false` | 防洞；本项目暂无视锥裁剪，子级存在即视为可见 |
+| `forceRefine = !ready && !hasContentUri && GE > 0` | 无内容的瓦片必须继续细化，否则是死路 |
+| `unconditionallyRefine = !hasContentUri \|\| GE >= nearestConditionalGE` | NASA `canUnconditionallyRefine`：数据 GE **非单调反弹**时，父级 SSE 达标不代表子级精度达标，必须细化到 GE 收敛层 |
+| `childConditionalGE = (hasContentUri && !unconditionallyRefine) ? GE : nearestConditionalGE` | 子级继承最近"条件父级"的 GE |
+| `nearestConditionalGE` 初值 = **+∞** | 任何有限值都会让根要么永远无条件细化、要么永不细化 |
+| `requestContent` 只在"停止细化"或"细化时对子级"被调用 | **推论：相机靠近时，根瓦片的 b3dm 根本不会被加载**——请求直接下钻到满足 SSE 的深层瓦片。我原先"先加载根、再逐级细化"的设想**是错的** |
+
+**本阶段有意未实现**（属 Phase 3 完整范围，逐条在代码里标了 TODO）：
+
+- **视锥裁剪**（`isChildVisible` / `cullWithChildrenBounds`）。缺它不会出错：细化本身被 SSE 限制，相机背后的瓦片距离远、SSE 小、自然停止细化；损失的只是"完全不去访问"的那部分节省，以及 `cullWithChildrenBounds`（REPLACE 瓦片子级可能超出父级包围体，需用并集做保守裁剪）
+- foveation（`_foveatedFactor` / `priorityDeferred`）
+- `dynamicScreenSpaceError`（雾因子衰减）
+- `skipLevelOfDetail`（跳过中间层级直载深层）
+- `cullRequestsWhileMoving`（出视锥请求取消）
+- 优先级队列排序（当前按遍历顺序加载）
+- LRU 淘汰与内存预算（当前只加载不淘汰；该数据集 373 个 b3dm，规模可控）
+
+### 16.5 加载与场景同步
+
+- **同步加载**：`FileAccess` 读盘 + `GLTFDocument` 装配都在主线程。用 `maximum_simultaneous_loads`（默认 8）限制每帧启动数，避免冷启动卡死单帧
+- **失败重试**：单瓦片失败重试 3 次后标记 `ContentState::Failed`，避免永久空白，也避免每帧重试刷屏
+- **可见性同步**：遍历前清空 `render_list`；同步时先隐藏 `loaded_tiles` 全部节点，再显示 `render_list` 中已就绪的。**按已加载列表而非瓦片树遍历**，开销与实挂载数成正比
+- **worldMatrix 每帧重贴**：内容挂载后仍每帧 `set_transform`，这样 georeference 或本节点移动后内容不会错位
+
+---
+
+## 17. 阻断项：`KHR_draco_mesh_compression`（Spike S1 门槛 3 失败）
+
+### 17.1 事实
+
+实测数据集（`D:\GISData\3D Tiles\1.0\Photogrammetry`，373 个 b3dm / 压缩后 38.3 MB）：
+
+```json
+"extensionsUsed":     ["KHR_materials_unlit","KHR_draco_mesh_compression"]
+"extensionsRequired": ["KHR_materials_unlit","KHR_draco_mesh_compression"]
+```
+
+两个都是**必需**扩展，所以严格加载器整份拒绝。运行时报错：
+
+```
+ERROR: glTF: Can't import file '', required extension 'KHR_draco_mesh_compression'
+       is not supported. Are you missing a GLTFDocumentExtension plugin?
+```
+
+**Godot 的核心 glTF 导入器不实现该扩展**（[godot#73738](https://github.com/godotengine/godot/issues/73738)）——不是构建开关、不是编辑器/运行时差异，就是没实现。引擎在 4.3+ 提供了 `GLTFDocumentExtension` 扩展点（报错信息正是在邀请实现一个），但**官方无实现**。社区有第三方 GDExtension（`GDDraco`，MIT，包 Google Draco SDK 1.5.7），但它是第三方、且声明只测过 Godot 4.5，不适合作为产品依赖。
+
+**其余全通。** 日志证明整条链路正确：`loaded ... tiles=374 maxDepth=8 rootGE=777.242 georeferenced=yes` → 遍历 → 内容路径解析到 `0/0.b3dm` → b3dm 解析成功 → 调用 `GLTFDocument` 才失败。**唯一断点是 Draco。**
+
+### 17.2 更正：D-2 的论证有两条要改
+
+**（a）「零新增原生依赖」这条不成立。** §16.2 把它列为选 `GLTFDocument` 的理由之一——但 Draco 是**几何压缩**，无论走 `GLTFDocument` 还是自建 `ArrayMesh`，**都必须自己解码**。方案 B 一样要引入 Draco SDK。所以这条理由无效。
+
+**（b）「门槛 3 失败 → 改选 B」这个裁决规则是错的。** §5.S1.5 写着 "1 或 3 失败 → 改选 B（自建 `ArrayMesh`）"。但 Draco 与装配路线**正交**：换 B 并不解决解码问题，只是把同一件事换到另一条路上去做，还额外丢掉 `GLTFDocument` 的材质/sampler/sRGB/上轴处理。
+
+**D-2 结论本身不变**（仍应选 `GLTFDocument`），但理由收窄为三条：① 它已覆盖原 1306 行手工装配要解决的问题；② 产出标准 `Node3D` 直接接入渲染管线；③ 主线程耗时可用每帧预算处理。**「零依赖」这条划掉。**
+
+### 17.3 三条可选路线
+
+| 路线 | 做法 | 代价 | 结果 |
+|---|---|---|---|
+| **A. 自己实现 Draco 解码扩展** | 链接 Google Draco SDK，实现 `GLTFDocumentExtension` 处理 `KHR_draco_mesh_compression`，用 `GLTFDocument::register_gltf_document_extension()` 注册 | 大：新增原生依赖 + 属性映射/图元重建逻辑；Godot 自带实现可作参考但要移植 | **长期正确**，插件从此能吃真实数据（Cesium ion 产出普遍带 Draco） |
+| **B. 离线把数据集转成非 Draco** | 用带 Draco 解码器的工具（`gltf-transform` / `3d-tiles-tools` / `draco3d`）逐瓦片解码重写 | 中：需写一个 b3dm 拆包→转码→回包的工具；38 MB 膨胀若干倍；**会改动用户数据集，必须写到新目录** | 今天就能看到画面，但**插件仍不能处理真实 Draco 数据**（能力缺口仍在） |
+| **C. 先拿小型非 Draco 样例集验证管线** | 下载 Cesium `3d-tiles-samples` 里不含 Draco 的小样例，指向它 | 小 | 把"管线本身是否正确"与"Draco 是否支持"**解耦**，最小代价确认前者的正确性 |
+
+**建议顺序：C → A。** C 的代价极小，且能立刻回答"我们的解析/遍历/装配到底对不对"这个当前无法区分的问题；A 是绕不过去的，早晚要做。B 只适合作为临时手段，且要单独评估是否值得改用户数据集。
+
+### 17.4 需要连带修正的计划条目
+
+- §2.D2 的「倾向 `GLTFDocument`」理由中删除"零新增原生依赖"，改为"需另行解决 Draco"
+- §5.S1.5 裁决表第 "1 或 3" 行的结论从「改选 B」改为「Draco 作为独立工作流处理，与装配路线无关」
+- Phase 0.5（Spike S1）新增一项验证目标：**Draco 解码能力的引入方式**（自己实现 vs 依赖第三方）
+- §9 完成定义第 3 条「原生依赖仅剩 godot-cpp + glm + nlohmann/json」需追加说明 Draco SDK 为例外
+
+### 17.5 已实施：转码路线（第 17.3 节的 A 与 B 的合体）
+
+用户决策：**用现成的三方库做 Draco 解码**（Google Draco SDK），**仍装配成 `MeshInstance3D`**。落地方式如下。
+
+**关键判断**：Godot 的 `GLTFDocumentExtension` 只暴露 `_get_supported_extensions` / `_parse_node_extensions` / `_generate_scene_node` / `_import_node` / `_import_post`，**没有网格或图元级钩子**——所以 Draco 扩展必须在 `_generate_scene_node()` 里自己建 `Mesh`+`MeshInstance3D`，且会绕过 Godot 的材质/sampler/色彩空间处理。
+
+**因此改为"容器重写"**：在把字节交给 `GLTFDocument` 之前，把 Draco 压缩的图元**解码并写回成普通 accessor**，再交给 `GLTFDocument`。这与 three.js 的 `DRACOLoader` 是同一种形态（它也是在构建几何之前把图元属性替换成解码后的数据），并且：
+
+- **装配路径仍然只有一条**（`GLTFDocument`），产出仍是标准 `MeshInstance3D` ✓ 满足用户"用 MeshInstance 装配"的要求
+- 材质、贴图、sampler、sRGB 全部免费保留（`KHR_materials_unlit` Godot 本来就支持）
+- 与引擎无关，放在 `src/core/content/`，可单元测试
+
+**交付**：
+
+| 文件 | 内容 |
+|---|---|
+| `src/core/content/DracoTranscoder.{h,cpp}` | `requiresDracoDecoding()` 与 `transcodeDracoToPlainGltf()`：解析 GLB 容器 → 逐图元 Draco 解码 → 把解码结果追加进 BIN chunk 并重指 accessor → 从 `extensionsUsed`/`extensionsRequired` 移除该扩展 → 重新序列化 GLB |
+| `extern/third_party/CMakeLists.txt` | `add_subdirectory(draco)` + 9 个必须显式关闭的选项（见 17.6），并把 `draco::draco` 挂到 `tiles3d_third_party` INTERFACE |
+| `src/ContentFactory.cpp` | 提取 GLB 后**无条件**调用转码（非 Draco 的 glTF 原样透传，故可无条件跑） |
+| `extern/third_party/draco/` | vendored Google Draco 1.5.7，裁剪后 **3.05 MB / 516 文件**（Apache-2.0） |
+
+**实现细节（值得记下的三条）**：
+
+1. **属性用 `PointAttribute::GetValue<float>()` 而不是 `GetValue<char>()` 之类**——它的模板参数是**输出**类型，内部会做 int→float 转换，所以量化过的法线/UV 也能正确读出 float，不需要自己处理 `data_type()` 分支。
+2. **顶点按"每 point 一条"展开**：`attribute->mapped_index(PointIndex(p))` 取属性值下标，面索引直接用 `mesh->face(f)[k].value()`（point 下标）。因为顶点数组是每 point 一条，所以 point 下标即顶点下标 ✓。
+3. **索引强制 `UNSIGNED_INT`(5125)**，避免 Draco 的顶点数跨过 uint16 边界。
+
+**未做（可后续优化）**：解码后的原压缩 bufferView 保留为死数据（删除会重排后续所有 view 下标）；未做 accessor 级去重与 `min`/`max` 重算（沿用原值，`POSITION` 的 min/max 因此仍是 Draco 前的值——数值上等价，因为解码是精确的）。
+
+### 17.6 Draco 的 CMake 选项（默认值会让 configure 直接失败）
+
+| 选项 | 值 | 不改的后果 |
+|---|---|---|
+| `DRACO_TRANSCODER_SUPPORTED` | OFF | 需要 Eigen / filesystem / tinygltf 三个子模块，裁剪后不存在 → `draco_die_missing_submodule` 直接 `FATAL_ERROR` |
+| `DRACO_TESTS` | OFF | 需要 googletest 子模块，同上 |
+| `DRACO_INSTALL` | OFF | 会把安装规则注册进顶层 install（与当初 doctest/glm/nlohmann 的泄漏同类） |
+| `DRACO_GLTF` / `DRACO_GLTF_BITSTREAM` | OFF | 无关目标 |
+| `DRACO_MAYA_PLUGIN` / `DRACO_UNITY_PLUGIN` / `DRACO_JS_GLUE` | OFF | 无关目标 |
+| `DRACO_VERBOSE` | OFF | 噪音 |
+
+`add_subdirectory` **必须给出独立的 binary 目录**——Draco 拒绝在源码树内配置（`draco_root == draco_build` 时 `FATAL_ERROR`）。
+
+原生库目标名是 **`draco_static`**（或 `draco_shared`），并用别名 **`draco::draco`** 统一引用（`CMakeLists.txt:1050/1053`）。
+
+---
+
+### 17.7 D-2 反转（D-13）：GLTFDocument → 自建装配（2026-09-17）
+
+**触发**：真实数据集（0/0.b3dm）在编辑器进程里加载后 `meshInstances=0`，屏幕无几何。逐层排查（读 4.7.2 引擎源码核实）：
+
+1. **根因**：Godot 的 glTF 导入器把网格节点生成为 `ImporterMeshInstance3D`（一个**不渲染的 Node3D 占位**），转换成 `MeshInstance3D` 由 `GLTFDocumentExtensionConvertImporterMesh::import_post` 完成。而 `modules/gltf/register_types.cpp` 用 `is_editor_hint()` 门控注册该扩展——**编辑器进程内永远不转换**。`generate_scene` 末尾只对"根节点本身是 ImporterMeshInstance3D"的情况做兜底转换，内部节点不做。编辑器里跑 Tileset3D（@tool 预览）拿到的就是占位节点，`countMeshInstances` 因此为 0。
+2. **次要摩擦**：内嵌图片在编辑器里走 `ResourceImporterTexture` 重导入管线（`_parse_image_save_image`），basePath 在项目外时产生 `Can't find file ... during reimport` 错误 + "uncompressed" 警告噪音（非致命）。
+3. **结构性成本**：为让 GLTFDocument 吃 Draco，我们维护了整个"GLB 重序列化"层（追加 BIN、重指 accessor、重写容器 ~200 行），而 GltfReader 本来就要解析这些 JSON；主线程还要承担 `append_from_buffer`/`generate_scene` 的完整导入管线开销。
+
+**决策（D-13）**：走 §2.D2 的选项 B。`GLTFDocument`/`DracoTranscoder` 整条路径删除，新增：
+
+| 文件 | 内容 |
+|---|---|
+| `src/core/content/GltfReader.{h,cpp}` | 引擎无关：GLB 容器解析、typed accessor 读取（componentType 5120–5126 / normalized / byteStride）、**Draco 直接解码为 SoA 顶点数据**（不再重序列化 GLB）、材质/纹理/采样器/场景图（matrix 与 TRS）、TRIANGLE_STRIP/FAN 展开、索引边界校验；不支持的能力（sparse、外部 buffer/图片 URI、meshopt/basisu）**报名失败**而非静默错绘 |
+| `src/ContentFactory.cpp`（重写） | 遍历 GltfModel 手工组装：每图元一个 `ArrayMesh` surface（SoA 直拷进 Packed 数组）、每 glTF 材质一个共享 `StandardMaterial3D`（unlit→UNSHADED、alphaMode→透明度模式、doubleSided→CULL_DISABLED、sampler filter/repeat 映射，4.7 的 wrap 是 `FLAG_USE_TEXTURE_REPEAT` bool flag）、内嵌图片 `load_jpg/png_from_buffer`→`ImageTexture`（mipmap 按采样器生成）；点亮材质缺 NORMAL 时按老 `computeFlatNormals` 路径展开平直法线 |
+
+**换来的**：编辑器/运行时行为完全一致（无 is_editor_hint 分叉）、无图片重导入噪音、删掉 GLB 重序列化层、Draco 解码直连装配（少一次全量拷贝）、逐图元行为全部可测。
+
+**代价（接受）**：材质只覆盖摄影测量子集（baseColorTexture/Factor、KHR_materials_unlit、alphaMode、doubleSided、sampler filter/wrap）；不支持 meshopt/basisu/sparse（报错即止）。这些正是本数据集与 Cesium ion 摄影测量产物的实际集合；扩大覆盖时在 `GltfReader` 单点加。
+
+---
+
+*本计划基于对两个仓库的完整源码阅读：`godot-3dtiles/src` 全量逐函数核对 + 参考实现 `index.ts` 结构映射 + 6 个 spec 文件 + 2 份设计文档；并在本机实测了工具链、版本、网络可达性与编译测试（§11–§17）。*

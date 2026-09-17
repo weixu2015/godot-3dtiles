@@ -333,9 +333,28 @@ TEST_CASE( "a malformed bounding volume is rejected rather than silently accepte
     CHECK( result.error.find( "malformed" ) != std::string::npos );
 }
 
-TEST_CASE( "a document without asset.version is rejected" )
+TEST_CASE( "a document without an asset object is rejected" )
 {
     nlohmann::json document = parseFixture( R"({
+        "geometricError": 500,
+        "root": { "boundingVolume": { "box": [0,0,0, 1,0,0, 0,1,0, 0,0,1] }, "geometricError": 1 }
+    })" );
+
+    TilesetParseResult result = parseTilesetJson( document );
+
+    CHECK_FALSE( static_cast<bool>( result ) );
+    CHECK( result.error.find( "missing asset" ) != std::string::npos );
+
+    // Must be the "no asset at all" branch, not the "asset without version" one. An earlier
+    // version of this test asserted on "asset.version" while supplying no asset object, so
+    // it failed for the right reason but for the wrong expectation.
+    CHECK( result.error.find( "asset.version" ) == std::string::npos );
+}
+
+TEST_CASE( "a document with an empty asset object is rejected" )
+{
+    nlohmann::json document = parseFixture( R"({
+        "asset": {},
         "geometricError": 500,
         "root": { "boundingVolume": { "box": [0,0,0, 1,0,0, 0,1,0, 0,0,1] }, "geometricError": 1 }
     })" );

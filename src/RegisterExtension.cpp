@@ -7,8 +7,10 @@
 #include "godot_cpp/core/defs.hpp"
 #include "godot_cpp/godot.hpp"
 
+#include "Georeference3D.h"
 #include "Godot3DTiles.h"
 #include "OriginAuthority.h"
+#include "Tileset3D.h"
 
 /// @file
 /// Register our classes with Godot.
@@ -34,10 +36,11 @@ namespace
         godot::ClassDB::register_class<LongitudeLatitudeHeight>();
         godot::ClassDB::register_class<EarthCenteredEarthFixed>();
 
-        // Georeference3D and Tileset3D are registered here once they exist. The 3D Tiles
-        // backend they need (scheduler + content pipeline) is phases 3 to 4 of
-        // docs/REFACTOR_PLAN.md; registering a class before its implementation would only
-        // fail class lookup at load time.
+        // The georeference and the tileset node. Tileset3D currently parses a tileset and
+        // draws its bounding volumes as wireframes; content rendering arrives with phases 3
+        // and 4 of docs/REFACTOR_PLAN.md.
+        godot::ClassDB::register_class<Georeference3D>();
+        godot::ClassDB::register_class<Tileset3D>();
     }
 
     /// @brief Called by Godot to let us do any cleanup.

@@ -1,3 +1,23 @@
 [gd_scene format=3 uid="uid://1yv27sh17bry"]
 
-[node name="Node3D" type="Node3D" unique_id=1896098034]
+[sub_resource type="EarthCenteredEarthFixed" id="EarthCenteredEarthFixed_anchor"]
+ecef_x = 1216363.6111466389
+ecef_y = -4736293.364982555
+ecef_z = 4081329.721623689
+
+[node name="Node3D" type="Node3D" unique_id=1500575376]
+
+[node name="Georeference3D" type="Georeference3D" parent="." unique_id=58985776]
+origin_authority = SubResource("EarthCenteredEarthFixed_anchor")
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0)
+
+[node name="Tileset3D" type="Tileset3D" parent="Georeference3D" unique_id=1444355910]
+url = "D:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
+debug_show_bounding_volume = false
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1423107194]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 200, 0)
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1243125709]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 400, 500)
+far = 40000.0

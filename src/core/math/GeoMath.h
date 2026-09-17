@@ -85,6 +85,18 @@ namespace tiles3d::math
     ///   halfAxes_i = axis_i * (max_i - min_i) / 2
     OrientedBoundingBox regionToEcefObb( const Region &region );
 
+    /// East-north-up frame anchored at an ECEF origin.
+    ///
+    /// Columns are (east, north, up) and the translation is `originEcef`, so this maps a
+    /// position expressed in the local ENU frame to ECEF. The result is Z-up, which is the
+    /// convention 3D Tiles uses for tile space; bringing it into Godot's Y-up world is the
+    /// Godot layer's job.
+    ///
+    /// Degenerate at the poles: east is derived from cross(+Z, up), which vanishes when up
+    /// is parallel to Z. An origin exactly on a pole yields a non-orthogonal frame; a
+    /// georeference should not be placed there.
+    Mat4 eastNorthUpToFixedFrame( const Vec3 &originEcef );
+
 } // namespace tiles3d::math
 
 #endif
