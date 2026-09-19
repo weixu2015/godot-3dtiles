@@ -26,6 +26,35 @@ namespace tiles3d::core
     /// volume into a silent NaN much later; failing here is far cheaper to diagnose.
     std::optional<math::BoundingVolume> parseBoundingVolume( const nlohmann::json &value );
 
+    /// The up axis of a tileset's glTF *content*, as declared by `asset.gltfUpAxis`
+    /// (3D Tiles 1.1, and the `gltfUpAxis` property of the 1.0 spec).
+    ///
+    /// The tile tree itself is always Z-up; this only says which axis the content is
+    /// authored in, and therefore whether the content needs an axis correction before it
+    /// lines up with its bounding volume.
+    enum class ModelUpAxis
+    {
+        X = 0,
+        Y = 1,
+        Z = 2,
+    };
+
+    /// Resolves the content up axis from a tileset document's `asset.gltfUpAxis`.
+    ///
+    /// Reading the declared axis rather than assuming Y is what keeps datasets that are
+    /// *already* Z-up from being rotated. The correction is a rotation about the glTF
+    /// origin, so applying it to content that sits far from that origin - a tile whose
+    /// vertices carry full tile-frame coordinates, e.g. (38722, 119689, 119) - throws the
+    /// geometry hundreds of thousands of units away, outside the camera's far plane, and
+    /// the tileset renders as nothing at all even though the scheduler reports it as
+    /// loaded. That is the taiwan regression: it declares `gltfUpAxis: "Z"` and must not
+    /// be rotated.
+    ///
+    /// An absent, empty or unrecognised value falls back to `fallback` (Y), which is what
+    /// every 1.0 dataset that never declared the field expects.
+    ModelUpAxis resolveModelUpAxis( const nlohmann::json &tilesetJson,
+                                    ModelUpAxis fallback = ModelUpAxis::Y );
+
     /// Outcome of parsing a tileset.json.
     ///
     /// The core layer does not throw (see BoundingVolume.h for why), so failures are
@@ -41,6 +70,11 @@ namespace tiles3d::core
 
         /// Tileset-level geometric error, as declared.
         double geometricError = 0.0;
+
+        /// Content up axis, resolved from `asset.gltfUpAxis`. Defaults to Y when the
+        /// document omits it or declares an unrecognised value, so every 1.0 dataset keeps
+        /// its existing behaviour.
+        ModelUpAxis modelUpAxis = ModelUpAxis::Y;
 
         /// Empty on success, otherwise a human readable reason.
         std::string error;

@@ -18,6 +18,7 @@
 #include "Georeference3D.h"
 
 #include "core/tiles/Tile.h"
+#include "core/tiles/TilesetJson.h"
 
 #include "godot_cpp/classes/mesh_instance3d.hpp"
 #include "godot_cpp/classes/node3d.hpp"
@@ -66,6 +67,13 @@ namespace tiles3d
         std::unique_ptr<core::Tile> root;
         godot::String asset_version;
         double root_geometric_error = 0.0;
+
+        /// Content up axis, resolved from the tileset's `asset.gltfUpAxis`. Decides whether
+        /// tile content needs an axis correction before it lines up with its bounding
+        /// volume - see ContentFactory::createContentNode. Read once at the root and reused
+        /// for every tile, external tilesets included.
+        core::ModelUpAxis model_up_axis_ = core::ModelUpAxis::Y;
+
         std::size_t tile_count = 0;
         int maximum_depth = 0;
         godot::String last_error;
@@ -108,6 +116,23 @@ namespace tiles3d
         void clear_loaded();
         void count_tiles();
         void build_debug_mesh();
+
+        /// Replaces every tile whose `content.uri` points at another tileset document with
+        /// that document's tile subtree, recursively.
+        ///
+        /// 3D Tiles signals "this tile is an external tileset" only through the URI
+        /// extension, so without this step the nested document is fetched as if it were
+        /// renderable content and fails with "unsupported tile content container". A dataset
+        /// built from nested tilesets - taiwan, with 2791 of them - then shows nothing at
+        /// all while still reporting a handful of tiles as loaded.
+        void expand_external_tilesets();
+
+        void expand_external_tileset( core::Tile &tile, int depth );
+
+        /// Rewrites the relative content URIs of a freshly merged subtree so they resolve
+        /// against `directory`, the document that declared them, rather than against the
+        /// root tileset's directory.
+        void rebase_content_uris( core::Tile &tile, const godot::String &directory );
 
         /// The Georeference3D this node ultimately descends from, or null. A null result
         /// means the tileset uses its own implicit georeference (origin centred on its ECEF

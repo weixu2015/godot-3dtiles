@@ -390,3 +390,79 @@ TEST_CASE( "parseBoundingVolume maps each representation" )
     const nlohmann::json unknown = parseFixture( R"({"ellipsoid":[1,2,3]})" );
     CHECK_FALSE( parseBoundingVolume( unknown ).has_value() );
 }
+
+// ---------------------------------------------------------------------------
+// Content up axis.
+//
+// Reading asset.gltfUpAxis is what keeps content that is ALREADY Z-up from being
+// rotated. The correction is a rotation about the glTF origin, so applying it to content
+// whose vertices carry full tile-frame coordinates - the taiwan dataset sits at
+// (38722, 119689, 119) - moves the geometry ~169k units away, outside the camera far
+// plane, and the tileset renders as nothing at all even though every tile reports as
+// loaded. Mirrors the up-axis lock-in cases of __tests__/up-axis.spec.ts.
+// ---------------------------------------------------------------------------
+
+TEST_CASE( "resolveModelUpAxis reads the declared gltfUpAxis" )
+{
+    const nlohmann::json zUp = parseFixture( R"({"asset":{"version":"1.1","gltfUpAxis":"Z"}})" );
+    CHECK( resolveModelUpAxis( zUp ) == ModelUpAxis::Z );
+
+    const nlohmann::json yUp = parseFixture( R"({"asset":{"version":"1.1","gltfUpAxis":"Y"}})" );
+    CHECK( resolveModelUpAxis( yUp ) == ModelUpAxis::Y );
+
+    const nlohmann::json xUp = parseFixture( R"({"asset":{"version":"1.1","gltfUpAxis":"X"}})" );
+    CHECK( resolveModelUpAxis( xUp ) == ModelUpAxis::X );
+}
+
+TEST_CASE( "resolveModelUpAxis falls back when the axis is absent or unrecognised" )
+{
+    // A 1.0 dataset that never declared the field must keep behaving as it always has.
+    const nlohmann::json absent = parseFixture( R"({"asset":{"version":"1.0"}})" );
+    CHECK( resolveModelUpAxis( absent ) == ModelUpAxis::Y );
+
+    const nlohmann::json invalid = parseFixture( R"({"asset":{"version":"1.1","gltfUpAxis":"UP"}})" );
+    CHECK( resolveModelUpAxis( invalid ) == ModelUpAxis::Y );
+
+    const nlohmann::json noAsset = parseFixture( R"({"geometricError":1})" );
+    CHECK( resolveModelUpAxis( noAsset ) == ModelUpAxis::Y );
+
+    // The fallback is the caller's assumption, not a hardcoded Y.
+    CHECK( resolveModelUpAxis( absent, ModelUpAxis::Z ) == ModelUpAxis::Z );
+}
+
+TEST_CASE( "a tileset declaring gltfUpAxis Z surfaces it on the parse result" )
+{
+    // Shaped like taiwan: Z-up content, a bounding box far from the glTF origin.
+    nlohmann::json document = parseFixture( R"({
+        "asset": { "version": "1.1", "gltfUpAxis": "Z" },
+        "geometricError": 54.3,
+        "root": {
+            "boundingVolume": { "box": [38722,119689,119, 420,0,0, 0,420,0, 0,0,420] },
+            "geometricError": 54.3,
+            "content": { "uri": "./Data/3143415263404252.glb" }
+        }
+    })" );
+
+    TilesetParseResult result = parseTilesetJson( document );
+
+    CHECK( static_cast<bool>( result ) );
+    CHECK( result.assetVersion == "1.1" );
+    CHECK( result.modelUpAxis == ModelUpAxis::Z );
+}
+
+TEST_CASE( "a 1.0 tileset without gltfUpAxis keeps the historical Y default" )
+{
+    nlohmann::json document = parseFixture( R"({
+        "asset": { "version": "1.0" },
+        "geometricError": 500,
+        "root": {
+            "boundingVolume": { "box": [0,0,0, 100,0,0, 0,100,0, 0,0,100] },
+            "geometricError": 500
+        }
+    })" );
+
+    TilesetParseResult result = parseTilesetJson( document );
+
+    CHECK( static_cast<bool>( result ) );
+    CHECK( result.modelUpAxis == ModelUpAxis::Y );
+}

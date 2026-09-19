@@ -9,6 +9,7 @@
 #define CONTENT_FACTORY_H
 
 #include "core/math/Mat4.h"
+#include "core/tiles/TilesetJson.h"
 
 #include "godot_cpp/classes/node3d.hpp"
 #include "godot_cpp/variant/packed_byte_array.hpp"
@@ -54,18 +55,32 @@ namespace tiles3d
     ///
     /// Transform layout of the result:
     ///   wrapper.transform  = worldMatrix
-    ///   gltfRoot.transform = rotationX(+90 deg) with origin at RTC_CENTER
+    ///   gltfRoot.transform = <up axis correction> with origin at RTC_CENTER
     ///
-    /// The +90 degree rotation about X is the glTF Y-up to tile Z-up correction, and it is
-    /// applied to the *content* only - never to a bounding volume. RTC_CENTER is
-    /// deliberately outside that rotation: it is expressed in the tile's coordinate system,
+    /// The correction depends on `upAxis`, which comes from the tileset's
+    /// `asset.gltfUpAxis`:
+    ///
+    ///   Y  +90 deg about X, i.e. M(v) = (vx, -vz, vy). The classic glTF Y-up -> tile Z-up
+    ///      correction, and the default for every dataset that does not declare an axis.
+    ///   Z  identity. The content is already Z-up and must NOT be rotated.
+    ///   X  -90 deg about Y, i.e. M(v) = (-vz, vy, vx), taking glTF X-up to tile Z-up.
+    ///
+    /// It is applied to the *content* only - never to a bounding volume. RTC_CENTER is
+    /// deliberately outside the rotation: it is expressed in the tile's coordinate system,
     /// so it composes after the axis correction rather than being carried by it.
+    ///
+    /// NOTE the rotation is about the glTF origin, so content whose vertices carry full
+    /// tile-frame coordinates - far from that origin - is displaced when it *is* rotated.
+    /// That is precisely why the declared axis has to be honoured: a Z-up dataset must skip
+    /// the correction entirely rather than have the displacement patched up afterwards.
     ///
     /// @param bytes raw payload.
     /// @param basePath unused (embedded images only); kept for API stability.
     /// @param worldMatrix the tile's accumulated world matrix.
+    /// @param upAxis the tileset's declared content up axis.
     ContentNode createContentNode( const godot::PackedByteArray &bytes,
-                                  const godot::String &basePath, const math::Mat4 &worldMatrix );
+                                  const godot::String &basePath, const math::Mat4 &worldMatrix,
+                                  core::ModelUpAxis upAxis = core::ModelUpAxis::Y );
 
 } // namespace tiles3d
 

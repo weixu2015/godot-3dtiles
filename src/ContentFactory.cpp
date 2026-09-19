@@ -553,7 +553,7 @@ namespace tiles3d
     } // namespace
 
     ContentNode createContentNode( const PackedByteArray &bytes, const String &basePath,
-                                   const math::Mat4 &worldMatrix )
+                                   const math::Mat4 &worldMatrix, core::ModelUpAxis upAxis )
     {
         // External resources are not resolved (embedded images only), so the base path is
         // no longer needed; the parameter stays for API stability.
@@ -604,13 +604,41 @@ namespace tiles3d
             return result;
         }
 
-        // Content root: rotationX(+90 deg) is the glTF Y-up to tile Z-up correction, and
-        // RTC_CENTER is its origin (expressed in the tile's coordinate system, so it
-        // composes after the correction and is not rotated by it).
+        // Content root: the up-axis correction, followed by RTC_CENTER as its origin
+        // (RTC_CENTER is expressed in the tile's coordinate system, so it composes after
+        // the correction and is not rotated by it).
+        //
+        // The correction is a rotation about the glTF origin, so it is only applied when
+        // the content actually needs it. Content that is already Z-up must NOT be rotated:
+        // with vertices carrying full tile-frame coordinates such as (38722, 119689, 119)
+        // the rotation moves them ~169k units away, past the camera's far plane, and the
+        // tileset renders as nothing at all even though every tile reports as loaded.
         math::Mat4 rootTransform{};
-        rootTransform[0] = glm::dvec4( 1.0, 0.0, 0.0, 0.0 );
-        rootTransform[1] = glm::dvec4( 0.0, 0.0, 1.0, 0.0 );
-        rootTransform[2] = glm::dvec4( 0.0, -1.0, 0.0, 0.0 );
+        switch ( upAxis )
+        {
+        case core::ModelUpAxis::Z:
+            // Already Z-up: no correction whatsoever.
+            rootTransform[0] = glm::dvec4( 1.0, 0.0, 0.0, 0.0 );
+            rootTransform[1] = glm::dvec4( 0.0, 1.0, 0.0, 0.0 );
+            rootTransform[2] = glm::dvec4( 0.0, 0.0, 1.0, 0.0 );
+            break;
+
+        case core::ModelUpAxis::X:
+            // glTF X-up -> tile Z-up: -90 deg about Y, i.e. M(v) = (-vz, vy, vx).
+            rootTransform[0] = glm::dvec4( 0.0, 0.0, 1.0, 0.0 );
+            rootTransform[1] = glm::dvec4( 0.0, 1.0, 0.0, 0.0 );
+            rootTransform[2] = glm::dvec4( -1.0, 0.0, 0.0, 0.0 );
+            break;
+
+        case core::ModelUpAxis::Y:
+        default:
+            // glTF Y-up -> tile Z-up: +90 deg about X, i.e. M(v) = (vx, -vz, vy). This is
+            // the default for every dataset that does not declare an up axis.
+            rootTransform[0] = glm::dvec4( 1.0, 0.0, 0.0, 0.0 );
+            rootTransform[1] = glm::dvec4( 0.0, 0.0, 1.0, 0.0 );
+            rootTransform[2] = glm::dvec4( 0.0, -1.0, 0.0, 0.0 );
+            break;
+        }
 
         if ( rtcCenter.has_value() )
         {

@@ -240,6 +240,16 @@ namespace tiles3d
             return flip;
         }
 
+        /// True when a content URI names another tileset document rather than renderable
+        /// content.
+        ///
+        /// 3D Tiles has no explicit flag for an external tileset - only the URI. A `.gltf`
+        /// is text glTF and therefore content; a `.json` is always a tileset document.
+        bool is_external_tileset_uri( const std::string &uri )
+        {
+            return uri.size() >= 5 && uri.compare( uri.size() - 5, 5, ".json" ) == 0;
+        }
+
         /// True when `node` or any of its ancestors is a Georeference3D.
         bool has_georeference_ancestor( const godot::Node *node )
         {
@@ -810,9 +820,16 @@ namespace tiles3d
         root = std::move( parsed.root );
         asset_version = String( parsed.assetVersion.c_str() );
         root_geometric_error = parsed.geometricError;
+        model_up_axis_ = parsed.modelUpAxis;
 
         // Content URIs in a tileset are relative to the tileset document.
         base_directory = path.get_base_dir();
+
+        // Splice in every nested tileset before anything else looks at the tree: the
+        // traversal, the region conversion, the bounding volume debug mesh and the tile
+        // count all have to see the real tree rather than a stump of unresolved
+        // `tileset.json` references.
+        expand_external_tilesets();
 
         placed_by_georeference = find_georeference() != nullptr;
         const math::Mat4 model = compute_model_matrix();
@@ -833,11 +850,21 @@ namespace tiles3d
         count_tiles();
         build_debug_mesh();
 
+        const char *upAxisName = "Y";
+        if ( model_up_axis_ == core::ModelUpAxis::X )
+        {
+            upAxisName = "X";
+        }
+        else if ( model_up_axis_ == core::ModelUpAxis::Z )
+        {
+            upAxisName = "Z";
+        }
+
         UtilityFunctions::print( godot::vformat(
-            "[Tileset3D] loaded '%s': version=%s tiles=%d maxDepth=%d rootGE=%.3f "
+            "[Tileset3D] loaded '%s': version=%s tiles=%d maxDepth=%d rootGE=%.3f upAxis=%s "
             "georeferenced=%s",
             path, asset_version, static_cast<int>( tile_count ), maximum_depth, root_geometric_error,
-            placed_by_georeference ? "yes" : "no (origin-centred fallback)" ) );
+            upAxisName, placed_by_georeference ? "yes" : "no (origin-centred fallback)" ) );
 
         emit_signal( "tileset_loaded" );
     }
@@ -851,6 +878,125 @@ namespace tiles3d
     void Tileset3D::unload()
     {
         clear_loaded();
+    }
+
+    void Tileset3D::expand_external_tilesets()
+    {
+        if ( root == nullptr )
+        {
+            return;
+        }
+
+        expand_external_tileset( *root, 0 );
+    }
+
+    void Tileset3D::expand_external_tileset( core::Tile &tile, int depth )
+    {
+        // A real dataset nests a handful of levels; anything past this is a cyclic or
+        // runaway chain of references.
+        constexpr int kMaxDepth = 32;
+        if ( depth > kMaxDepth )
+        {
+            return;
+        }
+
+        if ( tile.content.has_value() && is_external_tileset_uri( tile.content->uri ) )
+        {
+            const String nestedPath = content_path( tile );
+            const String nestedDir = nestedPath.get_base_dir();
+
+            bool merged = false;
+
+            Ref<FileAccess> file = FileAccess::open( nestedPath, FileAccess::READ );
+            if ( file.is_null() )
+            {
+                UtilityFunctions::printerr( "[Tileset3D] cannot open external tileset '",
+                                            nestedPath, "'" );
+            }
+            else
+            {
+                const String text = file->get_as_text();
+                file->close();
+
+                nlohmann::json document =
+                    nlohmann::json::parse( text.utf8().get_data(), nullptr, false );
+
+                if ( document.is_discarded() )
+                {
+                    UtilityFunctions::printerr( "[Tileset3D] external tileset '", nestedPath,
+                                                "' is not valid JSON" );
+                }
+                else
+                {
+                    core::TilesetParseResult external =
+                        core::parseTilesetJson( document, tile.refine );
+
+                    if ( !external )
+                    {
+                        UtilityFunctions::printerr( "[Tileset3D] external tileset '", nestedPath,
+                                                    "': ", String( external.error.c_str() ) );
+                    }
+                    else
+                    {
+                        core::Tile &externalRoot = *external.root;
+
+                        // URIs declared inside the external document are relative to *its*
+                        // directory, not to the root tileset's, so the incoming subtree is
+                        // rebased before it joins the tree.
+                        rebase_content_uris( externalRoot, nestedDir );
+
+                        // The container keeps its own bounding volume and geometric error:
+                        // those describe the region in the *referencing* tileset's frame and
+                        // are what the traversal culls and refines against. Everything that
+                        // makes the tile renderable - transform, content, children - comes
+                        // from the external document's root.
+                        //
+                        // isExternalTileset is deliberately NOT set: it forces unconditional
+                        // refinement, which would descend to every leaf regardless of screen
+                        // space error. A container that ended up with content must be allowed
+                        // to render it until the error says otherwise.
+                        tile.transform = math::multiply( tile.transform, externalRoot.transform );
+                        tile.content = std::move( externalRoot.content );
+
+                        for ( std::unique_ptr<core::Tile> &child : externalRoot.children )
+                        {
+                            tile.children.push_back( std::move( child ) );
+                        }
+
+                        merged = true;
+                    }
+                }
+            }
+
+            if ( !merged )
+            {
+                // Drop the unusable content so the loader stops fetching a tileset document
+                // as if it were a mesh. The tile degenerates into a plain container.
+                tile.content.reset();
+            }
+        }
+
+        for ( const std::unique_ptr<core::Tile> &child : tile.children )
+        {
+            expand_external_tileset( *child, depth + 1 );
+        }
+    }
+
+    void Tileset3D::rebase_content_uris( core::Tile &tile, const String &directory )
+    {
+        if ( tile.content.has_value() )
+        {
+            const String uri( tile.content->uri.c_str() );
+            if ( !uri.is_absolute_path() )
+            {
+                tile.content->uri = directory.path_join( uri ).utf8().get_data();
+            }
+        }
+
+        for ( const std::unique_ptr<core::Tile> &child : tile.children )
+        {
+            rebase_content_uris( *child, directory );
+        }
     }
 
     void Tileset3D::count_tiles()
@@ -1310,7 +1456,8 @@ namespace tiles3d
             if ( ok )
             {
                 const math::Mat4 world = tile->worldMatrix.value_or( math::identity() );
-                const ContentNode created = createContentNode( bytes, base_directory, world );
+                const ContentNode created =
+                    createContentNode( bytes, base_directory, world, model_up_axis_ );
 
                 if ( created )
                 {

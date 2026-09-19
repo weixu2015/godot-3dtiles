@@ -291,6 +291,34 @@ namespace tiles3d::core
         return std::nullopt;
     }
 
+    ModelUpAxis resolveModelUpAxis( const nlohmann::json &tilesetJson, ModelUpAxis fallback )
+    {
+        const auto assetIt = tilesetJson.find( "asset" );
+        if ( assetIt == tilesetJson.end() || !assetIt->is_object() )
+        {
+            return fallback;
+        }
+
+        const std::string declared = readString( *assetIt, "gltfUpAxis" );
+        if ( declared == "X" )
+        {
+            return ModelUpAxis::X;
+        }
+        if ( declared == "Y" )
+        {
+            return ModelUpAxis::Y;
+        }
+        if ( declared == "Z" )
+        {
+            return ModelUpAxis::Z;
+        }
+
+        // Absent, empty or something unrecognised: keep the caller's assumption rather
+        // than inventing one, so a 1.0 dataset that never declared the field behaves
+        // exactly as it always has.
+        return fallback;
+    }
+
     TilesetParseResult parseTilesetJson( const nlohmann::json &json, RefineMode rootRefine )
     {
         TilesetParseResult result;
@@ -316,6 +344,11 @@ namespace tiles3d::core
         }
 
         result.geometricError = readReal( json, "geometricError", 0.0 );
+
+        // Read once at the root. Content loading applies the correction per tile, and an
+        // external tileset hangs off the same tileset, so a single resolution covers the
+        // whole subtree.
+        result.modelUpAxis = resolveModelUpAxis( json );
 
         const auto rootIt = json.find( "root" );
         if ( rootIt == json.end() )
