@@ -6,6 +6,12 @@
 // local-to-ECEF transform that Tileset3D needs to place a tileset geographically; the node
 // transform itself is what carries the local frame into Godot's Y-up world (the demo scene
 // uses a +90 degree rotation about X, which is exactly the Z-up to Y-up flip).
+//
+// Role in the simplified node model (docs/REFACTOR_PLAN.md): this is the MULTI-SCENE node.
+// When several tilesets must be placed by real latitude/longitude relative to one another,
+// they are added as sibling children of one Georeference3D so they share a single frame. A
+// single tileset with no Georeference3D parent instead uses its own implicit georeference
+// (origin centred on its ECEF centre) and needs no Georeference3D at all.
 
 #ifndef GEOREFERENCE_3D_H
 #define GEOREFERENCE_3D_H

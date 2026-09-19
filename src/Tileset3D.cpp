@@ -28,6 +28,7 @@
 #include "godot_cpp/classes/mesh.hpp"
 #include "godot_cpp/classes/standard_material3d.hpp"
 #include "godot_cpp/classes/viewport.hpp"
+#include "godot_cpp/classes/scene_tree.hpp"
 #include "godot_cpp/core/class_db.hpp"
 #include "godot_cpp/core/memory.hpp"
 #include "godot_cpp/variant/array.hpp"
@@ -75,8 +76,8 @@ namespace tiles3d
         /// axis-aligned cube - good enough for a structural view, and regions never reach
         /// here because convertRegionBoundingVolumes turns them into boxes first.
         void appendVolumeEdges( const math::Mat4 &world, const math::BoundingVolume &volume,
-                                double scale, int depth, PackedVector3Array &vertices,
-                                PackedColorArray &colors )
+                                double scale, int depth, bool colorize,
+                                PackedVector3Array &vertices, PackedColorArray &colors )
         {
             std::array<math::Vec3, 8> corners{};
 
@@ -118,8 +119,10 @@ namespace tiles3d
             // Colour by tree depth so the level of detail structure is readable at a glance.
             // Explicit floats: Color::from_hsv takes float, and C4305 (double to float
             // truncation) is fatal here because the target builds with /WX.
-            const Color color = Color::from_hsv(
-                static_cast<float>( std::fmod( 0.11 * depth, 1.0 ) ), 0.85f, 1.0f );
+            const Color color = colorize
+                                    ? Color::from_hsv( static_cast<float>( std::fmod( 0.11 * depth, 1.0 ) ),
+                                                      0.85f, 1.0f )
+                                    : Color( 0.2f, 0.8f, 1.0f );
 
             // A cube has 12 edges: for every corner, the three neighbours whose index
             // differs by one bit, emitted once.
@@ -144,18 +147,20 @@ namespace tiles3d
         }
 
         void collectTileEdges( const core::Tile &tile, const math::Mat4 &parentWorld, double scale,
-                               PackedVector3Array &vertices, PackedColorArray &colors )
+                               bool colorize, PackedVector3Array &vertices,
+                               PackedColorArray &colors )
         {
             const math::Mat4 world = math::multiply( parentWorld, tile.transform );
 
             if ( tile.boundingVolume.has_value() )
             {
-                appendVolumeEdges( world, *tile.boundingVolume, scale, tile.depth, vertices, colors );
+                appendVolumeEdges( world, *tile.boundingVolume, scale, tile.depth, colorize,
+                                   vertices, colors );
             }
 
             for ( const std::unique_ptr<core::Tile> &child : tile.children )
             {
-                collectTileEdges( *child, world, scale, vertices, colors );
+                collectTileEdges( *child, world, scale, colorize, vertices, colors );
             }
         }
 
@@ -217,6 +222,59 @@ namespace tiles3d
                 dumpRecursive( *child, maxDepth, indent + 1 );
             }
         }
+
+        /// The Z-up -> Y-up flip that the demo's Georeference3D node applies. Godot's
+        /// Transform3D stores its basis row-major, so the demo transform
+        /// `Transform3D(1,0,0, 0,0,1, 0,-1,0)` is the matrix M(v) = (vx, vz, -vy), i.e. a
+        /// -90 degree rotation about X. Baking this into the implicit model matrix makes a
+        /// single, georeference-free tileset render with the exact same orientation as one
+        /// placed under an explicit Georeference3D. Columns below are the column-major form
+        /// of that matrix.
+        math::Mat4 z_up_to_y_up()
+        {
+            math::Mat4 flip;
+            flip[0] = math::Vec4( 1.0, 0.0, 0.0, 0.0 );
+            flip[1] = math::Vec4( 0.0, 0.0, -1.0, 0.0 );
+            flip[2] = math::Vec4( 0.0, 1.0, 0.0, 0.0 );
+            flip[3] = math::Vec4( 0.0, 0.0, 0.0, 1.0 );
+            return flip;
+        }
+
+        /// True when `node` or any of its ancestors is a Georeference3D.
+        bool has_georeference_ancestor( const godot::Node *node )
+        {
+            for ( const godot::Node *cursor = node; cursor != nullptr;
+                  cursor = cursor->get_parent() )
+            {
+                if ( godot::Object::cast_to<Georeference3D>( cursor ) != nullptr )
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// Counts Tileset3D nodes under `subtree` (excluding `except`) that have no
+        /// Georeference3D ancestor - the tilesets that would each centre on their own origin
+        /// instead of being placed by real latitude/longitude.
+        std::size_t count_unguided_tilesets( const godot::Node *subtree, const godot::Node *except )
+        {
+            std::size_t count = 0;
+            if ( subtree == nullptr || subtree == except )
+            {
+                return 0;
+            }
+            if ( godot::Object::cast_to<Tileset3D>( subtree ) != nullptr &&
+                 !has_georeference_ancestor( subtree ) )
+            {
+                ++count;
+            }
+            for ( int i = 0; i < subtree->get_child_count(); ++i )
+            {
+                count += count_unguided_tilesets( subtree->get_child( i ), except );
+            }
+            return count;
+        }
     } // namespace
 
     void Tileset3D::_bind_methods()
@@ -262,6 +320,25 @@ namespace tiles3d
                                PropertyInfo( Variant::FLOAT, "debug_bounding_volume_scale" ),
                                "set_debug_bounding_volume_scale",
                                "get_debug_bounding_volume_scale" );
+
+        ClassDB::bind_method( D_METHOD( "set_show", "p_value" ), &Tileset3D::set_show );
+        ClassDB::bind_method( D_METHOD( "get_show" ), &Tileset3D::get_show );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "show" ), "set_show",
+                               "get_show" );
+
+        ClassDB::bind_method( D_METHOD( "set_auto_frame_on_load", "p_value" ),
+                              &Tileset3D::set_auto_frame_on_load );
+        ClassDB::bind_method( D_METHOD( "get_auto_frame_on_load" ),
+                              &Tileset3D::get_auto_frame_on_load );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "auto_frame_on_load" ),
+                               "set_auto_frame_on_load", "get_auto_frame_on_load" );
+
+        ClassDB::bind_method( D_METHOD( "set_debug_colorize_tiles", "p_value" ),
+                              &Tileset3D::set_debug_colorize_tiles );
+        ClassDB::bind_method( D_METHOD( "get_debug_colorize_tiles" ),
+                              &Tileset3D::get_debug_colorize_tiles );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "debug_colorize_tiles" ),
+                               "set_debug_colorize_tiles", "get_debug_colorize_tiles" );
 
         ClassDB::bind_method( D_METHOD( "load" ), &Tileset3D::load );
         ClassDB::bind_method( D_METHOD( "reload" ), &Tileset3D::reload );
@@ -375,6 +452,56 @@ namespace tiles3d
         return debug_bounding_volume_scale;
     }
 
+    void Tileset3D::set_show( const bool p_value )
+    {
+        if ( show != p_value )
+        {
+            show = p_value;
+
+            if ( debug_mesh != nullptr )
+            {
+                debug_mesh->set_visible( show && debug_show_bounding_volume );
+            }
+            for ( core::Tile *tile : loaded_tiles )
+            {
+                if ( auto *node = static_cast<godot::Node3D *>( tile->contentUserData ) )
+                {
+                    node->set_visible( show &&
+                                      tile->contentState == core::ContentState::Ready );
+                }
+            }
+        }
+    }
+
+    bool Tileset3D::get_show() const
+    {
+        return show;
+    }
+
+    void Tileset3D::set_auto_frame_on_load( const bool p_value )
+    {
+        auto_frame_on_load = p_value;
+    }
+
+    bool Tileset3D::get_auto_frame_on_load() const
+    {
+        return auto_frame_on_load;
+    }
+
+    void Tileset3D::set_debug_colorize_tiles( const bool p_value )
+    {
+        if ( debug_colorize_tiles != p_value )
+        {
+            debug_colorize_tiles = p_value;
+            build_debug_mesh();
+        }
+    }
+
+    bool Tileset3D::get_debug_colorize_tiles() const
+    {
+        return debug_colorize_tiles;
+    }
+
     String Tileset3D::resolved_path() const
     {
         String path = url.strip_edges();
@@ -395,7 +522,15 @@ namespace tiles3d
 
     const Georeference3D *Tileset3D::find_georeference() const
     {
-        return godot::Object::cast_to<Georeference3D>( get_parent() );
+        for ( godot::Node *parent = get_parent(); parent != nullptr;
+              parent = parent->get_parent() )
+        {
+            if ( const Georeference3D *reference = godot::Object::cast_to<Georeference3D>( parent ) )
+            {
+                return reference;
+            }
+        }
+        return nullptr;
     }
 
     math::Mat4 Tileset3D::compute_model_matrix() const
@@ -410,10 +545,147 @@ namespace tiles3d
             return reference->ecef_to_local();
         }
 
-        // No georeference: fall back to the reference implementation's framing, which
-        // cancels the root transform so the dataset is centred on the origin. Good for
-        // looking at, but the dataset is then not placed on the globe at all.
-        return root != nullptr ? math::invert( root->transform ) : math::identity();
+        if ( root == nullptr )
+        {
+            return math::identity();
+        }
+
+        // Implicit per-tileset georeference (single tileset, no Georeference3D parent).
+        // Build an ENU frame at the dataset's own ECEF centre so coordinates stay small
+        // (float32 safe) and the dataset is centred on this node's origin. The fallback this
+        // used to use - inverse(root->transform) - is identity for region datasets, which
+        // left every coordinate at full ECEF magnitude (~6.4e6 m) and blew up float32
+        // precision. We also bake in the Z-up -> Y-up flip so the result is oriented exactly
+        // like a tileset placed under an explicit Georeference3D.
+        //
+        // The implicit frame is cached at load time (see below): the dataset's root bounding
+        // volume is rewritten from region to box during load, so recomputing it afterwards
+        // from the converted volume would be wrong.
+        if ( model_matrix_.has_value() )
+        {
+            return *model_matrix_;
+        }
+
+        const math::Vec3 rootCenter =
+            root->boundingVolume.has_value()
+                ? math::boundingVolumeCenter( *root->boundingVolume )
+                : math::Vec3( 0.0 );
+        const math::Vec3 ecefCenter = math::transformPoint( root->transform, rootCenter );
+        const math::Mat4 enuToEcef = math::eastNorthUpToFixedFrame( ecefCenter );
+        const math::Mat4 ecefToEnu = math::invert( enuToEcef );
+        const math::Mat4 model = math::multiply( z_up_to_y_up(), ecefToEnu );
+        model_matrix_ = model;
+        return model;
+    }
+
+    bool Tileset3D::configuration_is_valid() const
+    {
+        // Rule ④: a Tileset3D must not be nested inside another Tileset3D.
+        for ( godot::Node *parent = get_parent(); parent != nullptr;
+              parent = parent->get_parent() )
+        {
+            if ( godot::Object::cast_to<Tileset3D>( parent ) != nullptr )
+            {
+                return false;
+            }
+        }
+
+        // Rule ③: several Tileset3D without a shared Georeference3D each centre on their own
+        // origin, which is only valid for a single standalone tileset.
+        if ( !has_georeference_ancestor( this ) )
+        {
+            godot::SceneTree *tree = get_tree();
+            godot::Node *root = tree != nullptr ? tree->get_edited_scene_root() : nullptr;
+            if ( root != nullptr && count_unguided_tilesets( root, this ) >= 1 )
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    godot::PackedStringArray Tileset3D::_get_configuration_warnings() const
+    {
+        godot::PackedStringArray warnings;
+
+        // Rule ④: nested Tileset3D.
+        for ( godot::Node *parent = get_parent(); parent != nullptr;
+              parent = parent->get_parent() )
+        {
+            if ( godot::Object::cast_to<Tileset3D>( parent ) != nullptr )
+            {
+                warnings.push_back( "Tileset3D nodes must be siblings, not nested. Remove this "
+                                    "Tileset3D from inside another Tileset3D." );
+                break;
+            }
+        }
+
+        // Rule ③: more than one Tileset3D without a shared Georeference3D.
+        if ( !has_georeference_ancestor( this ) )
+        {
+            godot::SceneTree *tree = get_tree();
+            godot::Node *root = tree != nullptr ? tree->get_edited_scene_root() : nullptr;
+            if ( root != nullptr && count_unguided_tilesets( root, this ) >= 1 )
+            {
+                warnings.push_back(
+                    "Multiple Tileset3D nodes without a shared Georeference3D: each will centre "
+                    "on its own ECEF centre instead of being placed by real latitude/longitude. "
+                    "Add one Georeference3D node and parent all tilesets to it for multi-scene "
+                    "layouts." );
+            }
+        }
+
+        return warnings;
+    }
+
+    void Tileset3D::frame_camera()
+    {
+#ifdef TILES3D_EDITOR_TARGET
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
+        {
+            return;
+        }
+        if ( dataset_radius <= 0.0 )
+        {
+            return;
+        }
+
+        godot::EditorInterface *editor = godot::EditorInterface::get_singleton();
+        if ( editor == nullptr )
+        {
+            return;
+        }
+        godot::SubViewport *viewport = editor->get_editor_viewport_3d();
+        if ( viewport == nullptr )
+        {
+            return;
+        }
+        godot::Camera3D *camera = viewport->get_camera_3d();
+        if ( camera == nullptr )
+        {
+            return;
+        }
+
+        const godot::Vector3 target = get_global_transform().origin;
+        const double fov = static_cast<double>( camera->get_fov() );
+        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+        const double distance = ( dataset_radius / std::tan( ( fov * kDegToRad ) / 2.0 ) ) * 1.2;
+
+        const godot::Vector3 eye =
+            target + godot::Vector3( 0.0f, static_cast<float>( distance * 0.4f ),
+                                    static_cast<float>( distance ) );
+        const godot::Vector3 forward = ( target - eye ).normalized();
+        const godot::Vector3 worldUp( 0.0f, 1.0f, 0.0f );
+        const godot::Vector3 right = worldUp.cross( forward ).normalized();
+        const godot::Vector3 up = forward.cross( right ).normalized();
+        // Godot cameras look down their local -Z.
+        const godot::Basis basis( right, up, -forward );
+        camera->set_global_transform( godot::Transform3D( basis, eye ) );
+#else
+        (void)0;
+#endif
     }
 
     void Tileset3D::clear_loaded()
@@ -450,6 +722,9 @@ namespace tiles3d
         placed_by_georeference = false;
         frame_number = 0;
         last_rendered_count = 0;
+        dataset_radius = 0.0;
+        needs_framing = false;
+        model_matrix_.reset();
     }
 
     void Tileset3D::release_content( core::Tile &tile )
@@ -474,6 +749,17 @@ namespace tiles3d
     {
         if ( root != nullptr )
         {
+            return;
+        }
+
+        if ( !configuration_is_valid() )
+        {
+            // The node-tree rules are violated (see _get_configuration_warnings). Refuse to
+            // load so the misconfiguration cannot be missed at runtime; the editor already
+            // surfaces it as a configuration warning.
+            last_error = "invalid node configuration (see editor warnings)";
+            UtilityFunctions::printerr( "[Tileset3D] ", last_error, ": '", url, "'" );
+            emit_signal( "load_failed", last_error );
             return;
         }
 
@@ -535,6 +821,15 @@ namespace tiles3d
         // so they are rewritten into the tile local frame once, here.
         core::convertRegionBoundingVolumes( *root, model, model );
 
+        // Used by frame_camera() to fit the dataset in view after load.
+        dataset_radius = root->boundingVolume.has_value()
+                            ? math::boundingVolumeRadius( *root->boundingVolume )
+                            : 0.0;
+
+        // Flag the editor to frame the dataset once it has loaded (editor only).
+        needs_framing = auto_frame_on_load && godot::Engine::get_singleton() != nullptr &&
+                        godot::Engine::get_singleton()->is_editor_hint();
+
         count_tiles();
         build_debug_mesh();
 
@@ -588,8 +883,8 @@ namespace tiles3d
 
         PackedVector3Array vertices;
         PackedColorArray colors;
-        collectTileEdges( *root, compute_model_matrix(), debug_bounding_volume_scale, vertices,
-                          colors );
+        collectTileEdges( *root, compute_model_matrix(), debug_bounding_volume_scale,
+                          debug_colorize_tiles, vertices, colors );
 
         if ( vertices.is_empty() )
         {
@@ -784,6 +1079,13 @@ namespace tiles3d
         if ( root == nullptr )
         {
             return;
+        }
+
+        // Editor convenience: fly the camera to frame the dataset once after it loads.
+        if ( needs_framing )
+        {
+            frame_camera();
+            needs_framing = false;
         }
 
         ++frame_number;
@@ -1068,28 +1370,33 @@ namespace tiles3d
             }
         }
 
-        for ( core::Tile *tile : render_list )
+        // The master `show` toggle suppresses the whole subtree; otherwise reveal the tiles
+        // the traversal selected for rendering this frame.
+        if ( show )
         {
-            if ( tile->contentUserData == nullptr ||
-                 tile->contentState != core::ContentState::Ready )
+            for ( core::Tile *tile : render_list )
             {
-                continue;
-            }
+                if ( tile->contentUserData == nullptr ||
+                     tile->contentState != core::ContentState::Ready )
+                {
+                    continue;
+                }
 
-            auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
-            node->set_visible( true );
+                auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
+                node->set_visible( true );
 
-            // Re-apply the world matrix: cheap, and it keeps content correct if the
-            // georeference or this node moves after the tile was loaded.
-            if ( tile->worldMatrix.has_value() )
-            {
-                node->set_transform( toGodotTransform( *tile->worldMatrix ) );
+                // Re-apply the world matrix: cheap, and it keeps content correct if the
+                // georeference or this node moves after the tile was loaded.
+                if ( tile->worldMatrix.has_value() )
+                {
+                    node->set_transform( toGodotTransform( *tile->worldMatrix ) );
+                }
             }
         }
 
         if ( debug_mesh != nullptr )
         {
-            debug_mesh->set_visible( debug_show_bounding_volume );
+            debug_mesh->set_visible( show && debug_show_bounding_volume );
         }
     }
 

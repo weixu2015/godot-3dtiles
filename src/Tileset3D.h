@@ -56,6 +56,13 @@ namespace tiles3d
         /// Multiplies the drawn bounding volumes, purely for visibility.
         double debug_bounding_volume_scale = 1.0;
 
+        /// Web/cesium parity: master visibility toggle for the whole tileset subtree.
+        bool show = true;
+
+        /// Move the editor camera to frame the dataset once after it loads. Mirrors the
+        /// web "flyTo" behaviour; only acts in the editor.
+        bool auto_frame_on_load = true;
+
         std::unique_ptr<core::Tile> root;
         godot::String asset_version;
         double root_geometric_error = 0.0;
@@ -66,9 +73,23 @@ namespace tiles3d
         /// Directory of the tileset document, used to resolve relative content URIs.
         godot::String base_directory;
 
-        /// True when the tileset was placed through a Georeference3D parent, false when it
-        /// fell back to origin-centred framing.
+        /// True when the tileset descends from a Georeference3D ancestor, false when it
+        /// uses the implicit per-tileset georeference (origin centred on its own ECEF centre).
         bool placed_by_georeference = false;
+
+        /// Colour the debug wireframe by tile depth; when false it draws a single colour.
+        bool debug_colorize_tiles = true;
+
+        /// Bounding-sphere radius of the whole dataset, used for camera framing.
+        double dataset_radius = 0.0;
+
+        /// Set after load; cleared once frame_camera() has run (editor framing only).
+        bool needs_framing = false;
+
+        /// Cached model matrix from load(). Needed because the implicit (no-georeference)
+        /// frame is computed from the root bounding volume, which is rewritten from region to
+        /// box during load - so it cannot be recomputed correctly afterwards.
+        mutable std::optional<math::Mat4> model_matrix_;
 
         godot::MeshInstance3D *debug_mesh = nullptr;
 
@@ -88,10 +109,14 @@ namespace tiles3d
         void count_tiles();
         void build_debug_mesh();
 
-        /// The Georeference3D this node is parented to, or null.
+        /// The Georeference3D this node ultimately descends from, or null. A null result
+        /// means the tileset uses its own implicit georeference (origin centred on its ECEF
+        /// centre) - valid for a single tileset, forbidden when several share a scene.
         const Georeference3D *find_georeference() const;
 
-        /// ECEF -> render frame. See docs/REFACTOR_PLAN.md D1.
+        /// ECEF -> render frame. With a Georeference3D ancestor this is that node's
+        /// ecef_to_local(); without one it is the implicit frame (ENU at the dataset's own
+        /// ECEF centre, Z-up flipped to Godot Y-up). See docs/REFACTOR_PLAN.md D1.
         math::Mat4 compute_model_matrix() const;
 
         /// Strips a file:// prefix so Godot's FileAccess can open the result.
@@ -110,6 +135,13 @@ namespace tiles3d
         godot::String content_path( const core::Tile &tile ) const;
         godot::PackedByteArray read_tile_payload( const core::Tile &tile ) const;
         void release_content( core::Tile &tile );
+
+        /// Editor-only: flies the editor camera to frame the loaded dataset once.
+        void frame_camera();
+
+        /// Validates the node-tree rules (single implicit tileset vs shared georeference,
+        /// no nesting). Returns true when the configuration is allowed to load.
+        bool configuration_is_valid() const;
 
     protected:
         static void _bind_methods();
@@ -134,6 +166,18 @@ namespace tiles3d
         void set_debug_bounding_volume_scale( double p_value );
         double get_debug_bounding_volume_scale() const;
 
+        /// Master visibility toggle for the whole tileset subtree (wireframe + content).
+        void set_show( bool p_value );
+        bool get_show() const;
+
+        /// Fly the editor camera to frame the dataset once after it loads (editor only).
+        void set_auto_frame_on_load( bool p_value );
+        bool get_auto_frame_on_load() const;
+
+        /// Colour the debug wireframe by tile depth; a single colour is used when false.
+        void set_debug_colorize_tiles( bool p_value );
+        bool get_debug_colorize_tiles() const;
+
         /// Reads and parses the tileset named by `url`. Does nothing when already loaded.
         void load();
 
@@ -157,6 +201,12 @@ namespace tiles3d
 
         /// Prints the tile tree to the Godot console, `max_depth` levels deep.
         void dump_tree( int max_depth ) const;
+
+        /// Editor configuration warnings for rules ③ and ④ (see docs/REFACTOR_PLAN.md):
+        /// multiple Tileset3D without a shared Georeference3D, and nested Tileset3D. Must be
+        /// public - the base Node declares it public and godot-cpp's register_virtuals needs
+        /// access to bind it.
+        godot::PackedStringArray _get_configuration_warnings() const override;
     };
 
 } // namespace tiles3d

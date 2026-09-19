@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://cah3wkntvekvk"]
+
+[node name="Node3D" type="Node3D" unique_id=1906469559]
+
+[node name="Tileset3D" type="Tileset3D" parent="." unique_id=1364746136]
+url = "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
+debug_show_bounding_volume = false
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1163159589]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 200, 0)
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=225257457]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 400, 500)
+far = 40000.0
