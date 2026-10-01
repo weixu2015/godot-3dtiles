@@ -10,6 +10,7 @@
 #include "Georeference3D.h"
 #include "Globe3D.h"
 #include "GlobeCameraController.h"
+#include "GlobeTileLayer.h"
 #include "Godot3DTiles.h"
 #include "OriginAuthority.h"
 #include "Tileset3D.h"
@@ -51,6 +52,9 @@ namespace
         // Trackball camera for the globe. It extends Camera3D so a scene can use it in place
         // of a plain camera (docs/GLOBE_PLAN.md P3).
         godot::ClassDB::register_class<GlobeCameraController>();
+
+        // Streaming imagery quadtree for the globe surface (docs/GLOBE_PLAN.md P1).
+        godot::ClassDB::register_class<GlobeTileLayer>();
     }
 
     /// @brief Called by Godot to let us do any cleanup.

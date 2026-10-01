@@ -14,8 +14,8 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
-config/name="cesium-demo"
-run/main_scene="res://node_3d.tscn"
+config/name="godot-3dtiles Globe"
+run/main_scene="res://globe.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
 

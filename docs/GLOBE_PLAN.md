@@ -237,14 +237,14 @@ Godot 是 Y-up，参考实现是 **Y 为极轴** 的 ECEF。两者**恰好一致
 - 几何审计（`demo/capture_globe.tscn`）10/10：椭球居中原点、南北极 ±C（Y-up）、赤道 +A、`lon+90 → -Z`（不镜像）。
 - RTX 2060 实机截图确认：球体 + 经纬网线方向正确。
 
-### P1 — 地表四叉树 LOD
+### P1 — 地表四叉树 LOD ✅ 已完成（2026-10-01）
 
 | 任务 | 文件 | 验收 |
 |---|---|---|
-| P1.1 ECT 瓦片方案 | `src/core/ellipsoid/TileScheme.{h,cpp}`（新） | 单测：`tileXYToRectangle` 与 TS 逐字段一致 |
+| P1.1 ECT 瓦片方案 | `src/core/math/TileScheme.{h,cpp}`（新） | 单测：`tileXYToRectangle` 与 TS 逐字段一致 |
 | P1.2 地平线剔除 | `src/core/math/EllipsoidalOccluder.{h,cpp}`（新） | 单测：`isScaledSpacePointVisible` 与 TS 一致 |
-| P1.3 瓦片数据模型 | `src/core/ellipsoid/GlobeTile.{h,cpp}`（新） | 包围球、occludeePoint 懒计算 |
-| P1.4 四叉树选择遍历 | `src/Globe/GlobeQuadtree.{h,cpp}`（新） | 与 TS 同相机位姿下渲染级别一致（±1） |
+| P1.3 瓦片数据模型 | `src/GlobeTile.{h,cpp}`（新） | 包围球、occludeePoint 懒计算 |
+| P1.4 节点与遍历 | `src/GlobeTileLayer.{h,cpp}`（新，`Node3D`） | 编辑器 + 运行时都渲染出地表 |
 | P1.5 瓦片网格与纹理 | 同上 | 瓦片拼接无裂缝、极冠不破 |
 | P1.6 纹理回退 | 同上 | 快速推拉无空洞 |
 
@@ -253,6 +253,29 @@ Godot 是 Y-up，参考实现是 **Y 为极轴** 的 ECEF。两者**恰好一致
 2. 相机绕到地球背面时，`stats.culled` 计数显著增长（证明地平线剔除生效）
 3. 相机从太空推到地面，瓦片逐级细化且不出现持续空洞
 4. 与 TS 参考实现同相机位姿 trace-diff（可自动化）
+
+**实测结果**（`demo/globe.tscn`，RTX 2060 实机）：
+- 影像源对齐参考页的本地 Bing 缓存：`http://127.0.0.1:9090/tiles/bing/{q}.jpeg?n=z&g=11404`
+  （参考页走 Vite 代理 `/api → http://localhost:9090`，这里直连同源静态缓存，省掉代理一层）。
+  `maximum_level_` 取 16（Bing 服务上限 19，但本机缓存 17 级以上为空，取 16 免 404 风暴）。
+- 运行窗口 `demo/globe_capture.tscn`：`rendered=82 loading=9 cached=536 max_level=6`；
+  编辑器窗口（615 px 视口）：`rendered=16`，球体、海陆、大气均正常。
+- 编辑器可见性（踩坑记录，**不是** Godot 的相机限制，是三件事叠加）：
+
+  | 症状 | 根因 | 修法 |
+  |---|---|---|
+  | 编辑器里完全看不到地球 | `Tileset3D::frame_camera()` 按**数据集尺度**（台湾数据集半径约 1.2 km）把编辑器相机摆到 `(0, 499, 1248)`，这在北京时间 `Georeference3D` 原点上方 1.3 km，地球中心在 6.4e6 m 之外，整颗星球在地平线以下 | `Tileset3D::frame_camera()` 检测同场景有无 `Globe3D`，有则直接返回（globe 场景由 globe 自己取景） |
+  | 摆到正确机位仍一片黑 | 编辑器 3D 视口相机的近/远裁剪面是默认的 0.1 / **4000**，球心在 1.6e7 m 外 | `GlobeTileLayer` 新增 `manage_editor_clip`（默认开），按相机到椭球中心的距离**每帧**重设 near/far |
+  | 刚设好的 near/far 又被打回 0.1/4000 | 编辑器会逐帧重写 3D 视口相机的裁剪面，一次赋值撑不过一帧 | 同上，改成每帧维护；取景位姿反倒只需保持几帧（`needs_framing_` + `kFramingFrames`） |
+  | 编辑器相机崩溃时 `Condition "det == 0"` | 视口相机在编辑器建相机的一瞬间基是零矩阵，`affine_inverse()` 出 NaN 视锥把整帧瓦片全剔掉 | `compute_frustum()` 先查行列式，退化时放过一个视锥 |
+
+  > 结论：编辑器里跑 `_process` 完全正常（Tileset3D 在编辑器里打了 3500+ 帧 LOD），
+  > `EditorInterface::get_editor_viewport_3d()->get_camera_3d()` 拿到的相机可写、
+  > `Viewport` 的 camera-override API 虽然引擎源码里有（`viewport.cpp:4319`），
+  > 但 godot-cpp 没绑定，改不了，只能用 `set_global_transform` + `set_near/far`。
+- 调试开关：`GlobeTileLayer` 的 `print_telemetry = true` 会每 3 秒打一行
+  `editor / needs_framing / campos / camcenter / near / far / rendered`，
+  排查"场景看着是空的"时先开它，demo 场景默认关闭。
 
 ### P2 — 3D Tiles 落位（核心价值）
 
@@ -295,7 +318,7 @@ Godot 是 Y-up，参考实现是 **Y 为极轴** 的 ECEF。两者**恰好一致
 - 相机不穿地走**缩放空间**（X/Z 除 A、Y 除 C 得单位球）判定，与 `EllipsoidalOccluder` 同套数学。
 
 
-### P4 — 大气与昼夜（Godot 原生方案）
+### P4 — 大气与昼夜（Godot 原生方案） ✅ 已完成 2026-10-01
 
 | 任务 | 文件 | 验收 |
 |---|---|---|
@@ -303,10 +326,28 @@ Godot 是 Y-up，参考实现是 **Y 为极轴** 的 ECEF。两者**恰好一致
 | P4.2 太阳方向与昼夜 | `Globe3D` + `DirectionalLight3D` | 晨昏线位置正确 |
 | P4.3 体积云 | Godot 体积雾 / 自定义 fog shader | 太空视角可见云层 |
 
-**决策**：**不做独立大气壳 mesh + raymarch**（参考实现的方案），改用 Godot 原生
-`Environment` + 体积雾。这样避免了 G5 风险（Three.js `onBeforeCompile` 注入点在 Godot 无对应）。
+**决策**：**不做独立大气壳 mesh + raymarch**（参考实现的方案），也**不走 `Environment` 体积雾**。
+体积雾在 Compatibility 渲染器下难以得到清晰可控的 limb glow，调试中发现它还会把整颗星球
+笼罩成灰色。最终采用一个 Godot 原生 `ShaderMaterial` 实现的 **back-face glow shell**：在椭球
+外面再套一层稍大的球壳，`cull_front` 只画背面，`blend_add` 做边缘辉光。这样完全在 Godot
+标准管线内，无 G5 风险，且检查器可直接调颜色、强度、衰减。
 
 **P4 验收标准**：太空视角截图与参考 `globe.html` 对比（大气厚度、晨昏线位置）。
+
+**实现记录（2026-10-01）**
+- 最终没有走 `Environment` 体积雾，而是用一个 **back-face glow shell**：`Globe3D` 在椭球面外
+  再生成一层稍大的球壳，材质 `render_mode blend_add, cull_front, unshaded, depth_draw_never`。
+  壳片用 `cull_front` 只保留星球背面那半层，且深度测试仍开启，因此星球会把壳的远半面遮住，
+  剩下的就是从星球轮廓溢出的一圈光晕。
+- 大气落进 `ALBEDO` 而不是 `EMISSION`：`unshaded` 模式下 `EMISSION` 会被忽略，这是调试中
+  最隐蔽的坑（渲染完全正确，但像素全黑）。辉光公式为 `pow(1 - |N·V|, falloff)`，保证边缘最亮。
+- 颜色/强度/衰减都暴露为检查器属性：`atmosphere_scale`（默认 1.06）、`atmosphere_color`
+  （默认 `(0.30, 0.55, 1.0)`）、`atmosphere_intensity`（默认 2.4）、`atmosphere_falloff`
+  （默认 8.0）。
+- `demo/globe.tscn` 作为入口场景：黑色太空背景 + ProceduralSkyMaterial（近黑）+ 自动将太阳
+  对准可见半球 + 初始距离 16 000 km，打开即能看到完整地球与蓝色大气环。
+
+**本轮未做**：体积云（P4.3）留待后续。
 
 ### P5 — `GlobeSubScene`（预留，本轮不实现）
 
@@ -341,7 +382,7 @@ CesiumGeoreference
 | G2 | 地平线剔除遗漏 | 背面瓦片全加载，性能崩 | P1.2 单测对齐 TS；P1 验收第 2 条 |
 | G3 | 地表用 ENU 切平面近似导致全球尺度失真 | 拉远后地表严重变形 | §3.3 已定：地表走 **ECEF 直算**，不经 ENU 帧 |
 | G4 | Godot 的 `Camera3D::set_near()` 钳制 `MAX(near, 0.001)` | 无法用 big_space 式的 `near/scale` 手法 | 本方案不依赖 near 极小值，规避（这也是选 Origin Shift 的原因之一） |
-| G5 | 大气方案的 Three.js `onBeforeCompile` 注入点在 Godot 无对应 | 昼夜光照无法注入瓦片材质 | **已定 P4 改用 Godot 原生 `Environment`**，不做独立大气壳 mesh |
+| G5 | 大气方案的 Three.js `onBeforeCompile` 注入点在 Godot 无对应 | 昼夜光照无法注入瓦片材质 | **已定 P4 改用 Godot 原生 `ShaderMaterial` 后壳辉光**，不做独立大气壳 mesh，也不走体积雾 |
 | G6 | 动态 rebase 与 `frame_camera()`（编辑器自动取景）交互 | 取景后坐标系错乱 | `frame_camera()` 后强制 re-base 一次 |
 | G7 | 大地形瓦片顶点数爆炸（P1 程序化生成的瓦片网格） | 内存/带宽 | 瓦片网格按层级降细分（参考实现：`segs = clamp(64 >> min(level,4), 6, 32)`） |
 | G8 | re-base 原点跳变影响局部物理/粒子 | 局部场景抖动 | P5 `GlobeSubScene` 隔离；本轮在 re-base 逻辑预留钩子 |

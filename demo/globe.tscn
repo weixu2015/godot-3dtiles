@@ -1,0 +1,63 @@
+[gd_scene load_steps=8 format=3 uid="uid://cglobemain1"]
+
+[ext_resource type="Script" path="res://globe.gd" id="1_globe"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
+sky_top_color = Color(0.004, 0.006, 0.018, 1)
+sky_horizon_color = Color(0.004, 0.006, 0.018, 1)
+ground_bottom_color = Color(0.004, 0.006, 0.018, 1)
+ground_horizon_color = Color(0.004, 0.006, 0.018, 1)
+
+[sub_resource type="Sky" id="Sky_2"]
+sky_material = SubResource("Sky_1")
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 2
+sky = SubResource("Sky_2")
+ambient_light_source = 3
+ambient_light_color = Color(0.16, 0.2, 0.3, 1)
+ambient_light_sky_contribution = 0.5
+ambient_light_energy = 0.22
+tonemap_mode = 3
+tonemap_white = 4.0
+ssao_enabled = false
+glow_enabled = false
+
+[sub_resource type="LongitudeLatitudeHeight" id="LLH_anchor"]
+longitude = 120.97
+latitude = 23.5
+height = 0.0
+
+[node name="GlobeMain" type="Node3D"]
+script = ExtResource("1_globe")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.70710678, -0.35355339, 0.61237244, 0.0, 0.8660254, 0.5, -0.70710678, -0.35355339, 0.61237244, 0, 0, 0)
+light_energy = 1.5
+shadow_enabled = false
+
+[node name="Georeference3D" type="Georeference3D" parent="."]
+origin_authority = SubResource("LLH_anchor")
+
+[node name="Globe3D" type="Globe3D" parent="Georeference3D"]
+radial_segments = 128
+rings = 64
+show_graticule = false
+show_atmosphere = true
+atmosphere_scale = 1.06
+atmosphere_color = Color(0.3, 0.55, 1, 1)
+atmosphere_intensity = 2.4
+atmosphere_falloff = 8.0
+
+[node name="GlobeTileLayer" type="GlobeTileLayer" parent="Georeference3D"]
+
+[node name="Tileset3D" type="Tileset3D" parent="Georeference3D"]
+url = "E:/GISData/3D Tiles/taiwan/tileset.json"
+debug_show_bounding_volume = false
+
+[node name="GlobeCameraController" type="GlobeCameraController" parent="."]
+far = 200000000.0
+near = 1000.0

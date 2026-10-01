@@ -220,6 +220,15 @@ namespace tiles3d
         return math::kWgs84MeanRadius * 8.0;
     }
 
+    const GlobeFrame &GlobeCameraController::frame() const
+    {
+        // Re-resolve whenever the node moves in the tree; resolve() itself is cheap (the
+        // georeference caches its matrices) and keeps reparenting correct.
+        frame_ = GlobeFrame::resolve( this );
+        frame_valid_ = true;
+        return frame_;
+    }
+
     Vector3 GlobeCameraController::resolve_ellipsoid_center() const
     {
         // The Earth's centre is the origin of ECEF. Find the frame that maps ECEF into this
@@ -295,39 +304,62 @@ namespace tiles3d
 
     double GlobeCameraController::camera_height_above_ellipsoid() const
     {
-        // Height above the ellipsoid in the Y-up metric the drawn surface uses. The camera
-        // position is in parent space; convert to an ECEF-relative direction by measuring
-        // from the pivot. The scaled-space length is what turns a radial distance into a
-        // height above the surface (same trick as the reference cameraHeightAboveEllipsoid).
+        // Height above the ellipsoid via the reference's scaled-space trick: express the
+        // camera offset from the ellipsoid centre in Y-up ECEF metres, then divide by the
+        // per-axis radii so the ellipsoid becomes the unit sphere.
+        const GlobeFrame &globe_frame = frame();
         const Vector3 pivot = resolve_pivot();
         const Vector3 relative = get_position() - pivot;
+        const math::Vec3 centre_ecef =
+            globe_frame.to_ecef_z_up( math::Vec3( pivot.x, pivot.y, pivot.z ) );
+        const math::Vec3 camera_ecef = globe_frame.to_ecef_z_up( math::Vec3(
+            pivot.x + relative.x, pivot.y + relative.y, pivot.z + relative.z ) );
+        const math::Vec3 offset_y_up(
+            camera_ecef.x - centre_ecef.x,
+            camera_ecef.z - centre_ecef.z, // Z-up -> Y-up along the way
+            -( camera_ecef.y - centre_ecef.y ) );
         const double scaledLength = std::sqrt(
-            ( relative.x / math::kWgs84SemiMajorAxis ) * ( relative.x / math::kWgs84SemiMajorAxis ) +
-            ( relative.y / math::kWgs84SemiMinorAxis ) * ( relative.y / math::kWgs84SemiMinorAxis ) +
-            ( relative.z / math::kWgs84SemiMajorAxis ) * ( relative.z / math::kWgs84SemiMajorAxis ) );
+            ( offset_y_up.x / math::kWgs84SemiMajorAxis ) *
+                ( offset_y_up.x / math::kWgs84SemiMajorAxis ) +
+            ( offset_y_up.y / math::kWgs84SemiMinorAxis ) *
+                ( offset_y_up.y / math::kWgs84SemiMinorAxis ) +
+            ( offset_y_up.z / math::kWgs84SemiMajorAxis ) *
+                ( offset_y_up.z / math::kWgs84SemiMajorAxis ) );
         if ( scaledLength <= 0.0 )
         {
             return 0.0;
         }
 
-        const double radius = relative.length();
+        const double radius = glm::length( offset_y_up );
         return radius * ( 1.0 - 1.0 / scaledLength );
     }
 
     void GlobeCameraController::enforce_camera_above_ellipsoid()
     {
+        const GlobeFrame &globe_frame = frame();
         const Vector3 pivot = resolve_pivot();
         Vector3 relative = get_position() - pivot;
+        const math::Vec3 centre_ecef =
+            globe_frame.to_ecef_z_up( math::Vec3( pivot.x, pivot.y, pivot.z ) );
+        const math::Vec3 camera_ecef = globe_frame.to_ecef_z_up( math::Vec3(
+            pivot.x + relative.x, pivot.y + relative.y, pivot.z + relative.z ) );
+        const math::Vec3 offset_y_up(
+            camera_ecef.x - centre_ecef.x,
+            camera_ecef.z - centre_ecef.z, // Z-up -> Y-up along the way
+            -( camera_ecef.y - centre_ecef.y ) );
         const double scaledLength = std::sqrt(
-            ( relative.x / math::kWgs84SemiMajorAxis ) * ( relative.x / math::kWgs84SemiMajorAxis ) +
-            ( relative.y / math::kWgs84SemiMinorAxis ) * ( relative.y / math::kWgs84SemiMinorAxis ) +
-            ( relative.z / math::kWgs84SemiMajorAxis ) * ( relative.z / math::kWgs84SemiMajorAxis ) );
+            ( offset_y_up.x / math::kWgs84SemiMajorAxis ) *
+                ( offset_y_up.x / math::kWgs84SemiMajorAxis ) +
+            ( offset_y_up.y / math::kWgs84SemiMinorAxis ) *
+                ( offset_y_up.y / math::kWgs84SemiMinorAxis ) +
+            ( offset_y_up.z / math::kWgs84SemiMajorAxis ) *
+                ( offset_y_up.z / math::kWgs84SemiMajorAxis ) );
         if ( scaledLength <= 0.0 )
         {
             return;
         }
 
-        const double radius = relative.length();
+        const double radius = glm::length( offset_y_up );
         const double height = radius * ( 1.0 - 1.0 / scaledLength );
         if ( height < kMinCameraHeight )
         {
@@ -551,12 +583,18 @@ namespace tiles3d
         const double latitude = p_latitude_degrees * ( math::kPi / 180.0 );
 
         // Position on the sphere of radius p_distance around the pivot, then look straight at
-        // the pivot with the north pole as up.
+        // the pivot with the north pole as up. The lon/lat direction is a Y-up ECEF
+        // direction; the shared frame rotates it into whatever the scene is using.
+        const GlobeFrame &globe_frame = frame();
         const Vector3 pivot = resolve_pivot();
-        const Vector3 surface_direction(
-            static_cast<float>( std::cos( latitude ) * std::cos( longitude ) ),
-            static_cast<float>( std::sin( latitude ) ),
-            static_cast<float>( -std::cos( latitude ) * std::sin( longitude ) ) );
+        const math::Vec3 direction_ecef(
+            std::cos( latitude ) * std::cos( longitude ),
+            std::sin( latitude ),
+            -std::cos( latitude ) * std::sin( longitude ) );
+        const math::Vec3 direction_local = globe_frame.local_direction( direction_ecef );
+        const Vector3 surface_direction( static_cast<float>( direction_local.x ),
+                                         static_cast<float>( direction_local.y ),
+                                         static_cast<float>( direction_local.z ) );
 
         const Vector3 position = pivot + surface_direction * static_cast<float>( p_distance );
         set_position( position );

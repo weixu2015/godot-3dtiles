@@ -22,6 +22,7 @@
 #ifndef GLOBE_CAMERA_CONTROLLER_H
 #define GLOBE_CAMERA_CONTROLLER_H
 
+#include "GlobeFrame.h"
 #include "core/math/Types.h"
 
 #include "godot_cpp/classes/camera3d.hpp"
@@ -84,6 +85,13 @@ namespace tiles3d
         void _notification( int p_what );
 
     private:
+        /// The shared globe frame, re-resolved whenever the pivot is (an ancestor
+        /// Georeference3D or a sibling Globe3D may appear or move at any time).
+        mutable GlobeFrame frame_{};
+        mutable bool frame_valid_ = false;
+
+        const GlobeFrame &frame() const;
+
         bool inertia_enabled_ = true;
         double rotate_speed_scale_ = 1.0;
         double zoom_speed_scale_ = 1.0;

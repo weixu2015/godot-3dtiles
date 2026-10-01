@@ -3,8 +3,8 @@ extends Node3D
 # P3 verification harness for GlobeCameraController.
 #
 # Checks the things that are easy to get wrong and would not be caught by eyeballing:
-#   1. resolve_ellipsoid_center() finds the Earth's centre in local space (one Earth radius
-#      from the globe's surface origin).
+#   1. resolve_ellipsoid_center() returns the same point the globe actually drew (with no
+#      Georeference3D that is the node's local origin, i.e. the Earth's centre).
 #   2. orbit_to() places the camera at the requested distance and looks at the pivot.
 #   3. set_camera_pose / get_camera_direction / get_camera_up round-trip.
 #   4. set_distance() keeps the orbit radius.
@@ -36,11 +36,15 @@ func _ready() -> void:
 
 	print("=== GlobeCameraController P3 audit ===")
 
-	# 1. Pivot resolution. The globe fallback frame origin sits on the ellipsoid, so the
-	# Earth centre must be about one mean radius away.
+	# 1. Pivot resolution. The invariant is not a hard-coded distance - it is that the point
+	# the camera orbits is the ellipsoid that was actually drawn. With no Georeference3D the
+	# globe's local origin *is* the Earth's centre, so both land on the origin; under a
+	# Georeference3D both move together. Comparing them catches the drift that once put the
+	# pivot a full Earth radius away from the mesh.
 	var pivot: Vector3 = cam.resolve_ellipsoid_center()
-	_check(absf(pivot.length() - 6356752.3) < 1000.0 or absf(pivot.length() - 6378137.0) < 1000.0,
-		"pivot is ~1 Earth radius from local origin (|p|=%.0f)" % pivot.length())
+	var globe_center: Vector3 = globe.ecef_to_local(Vector3.ZERO)
+	_check(pivot.distance_to(globe_center) < 1.0,
+		"pivot is the drawn ellipsoid's centre (d=%.3f)" % pivot.distance_to(globe_center))
 
 	# 2. orbit_to: distance and facing.
 	cam.orbit_to(0.0, 0.0, 20000000.0)

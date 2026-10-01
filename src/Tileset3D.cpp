@@ -3,6 +3,7 @@
 #include "Tileset3D.h"
 
 #include "ContentFactory.h"
+#include "Globe3D.h"
 #include "GodotMathConvert.h"
 
 #include "core/math/BoundingVolume.h"
@@ -257,6 +258,31 @@ namespace tiles3d
                   cursor = cursor->get_parent() )
             {
                 if ( godot::Object::cast_to<Georeference3D>( cursor ) != nullptr )
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// True when a Globe3D sits anywhere below `subtree`. The globe is planetary-scale,
+        /// so in a globe scene the tileset must not claim the editor camera: framing a
+        /// metre-sized dataset would park the camera a kilometre above the georeference
+        /// origin, deep inside the sky, with the Earth far below the local horizon. The
+        /// globe's own framing (planetary distance) is the only pose that shows anything.
+        bool has_globe_in_scene( const godot::Node *subtree )
+        {
+            if ( subtree == nullptr )
+            {
+                return false;
+            }
+            if ( godot::Object::cast_to<Globe3D>( subtree ) != nullptr )
+            {
+                return true;
+            }
+            for ( int i = 0; i < subtree->get_child_count(); ++i )
+            {
+                if ( has_globe_in_scene( subtree->get_child( i ) ) )
                 {
                     return true;
                 }
@@ -658,6 +684,17 @@ namespace tiles3d
             return;
         }
         if ( dataset_radius <= 0.0 )
+        {
+            return;
+        }
+
+        // A Globe3D in the same scene owns the editor camera; see has_globe_in_scene().
+        godot::Node *scene_root = this;
+        while ( scene_root->get_parent() != nullptr )
+        {
+            scene_root = scene_root->get_parent();
+        }
+        if ( has_globe_in_scene( scene_root ) )
         {
             return;
         }

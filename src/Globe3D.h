@@ -11,15 +11,17 @@
 // requiring it would break the standalone and Georeference3D-parented layouts that
 // already exist.
 //
-// When no Georeference3D is found the globe falls back to its own frame anchored at
-// (longitude 0, latitude 0), which is the same default the EarthCenteredEarthFixed
-// resource uses. That keeps a lone Globe3D useful in an empty scene.
+// When no Georeference3D is found the globe uses the Earth's centre as its local origin, so
+// the drawn ellipsoid and the geography API describe the same points with no offset. Under a
+// Georeference3D both move to that frame's anchor instead, which is what lines the surface up
+// with sibling Tileset3D content.
 
 #ifndef GLOBE_3D_H
 #define GLOBE_3D_H
 
 #include "Georeference3D.h"
 
+#include "GlobeFrame.h"
 #include "core/math/Types.h"
 
 #include "godot_cpp/classes/mesh_instance3d.hpp"
@@ -62,6 +64,34 @@ namespace tiles3d
         void set_show_graticule( bool p_value );
         bool get_show_graticule() const;
 
+        // ---- atmosphere ----
+
+        /// Draws a rim-glow shell around the ellipsoid. This is the cheap, Godot-native
+        /// stand-in for the reference implementation's raymarched atmosphere: a back-face
+        /// shell a few percent larger than the globe, shaded by a fresnel term so it is
+        /// brightest at the limb and transparent when viewed head-on. See
+        /// docs/GLOBE_PLAN.md P4 for why the raymarch was rejected.
+        void set_show_atmosphere( bool p_value );
+        bool get_show_atmosphere() const;
+
+        /// Atmosphere shell radius, as a fraction of the ellipsoid radius. 1.02 reads as a
+        /// thin shell; the reference's optical depth corresponds to roughly this.
+        void set_atmosphere_scale( double p_value );
+        double get_atmosphere_scale() const;
+
+        /// Colour at the limb (horizon). Defaults to a Rayleigh-ish blue.
+        void set_atmosphere_color( const godot::Color &p_color );
+        godot::Color get_atmosphere_color() const;
+
+        /// Multiplies the fresnel emission. Raise for a thicker-looking atmosphere.
+        void set_atmosphere_intensity( double p_value );
+        double get_atmosphere_intensity() const;
+
+        /// How tightly the glow hugs the limb. Higher values keep the rim thinner and the
+        /// disc clearer; lower values wash the whole globe.
+        void set_atmosphere_falloff( double p_value );
+        double get_atmosphere_falloff() const;
+
         /// Rebuilds the ellipsoid mesh. Called automatically when segments, rings or the
         /// graticule toggle change; exposed for scripted use.
         void rebuild();
@@ -80,6 +110,15 @@ namespace tiles3d
         /// degrees and metres.
         godot::Vector3 local_to_geodetic( const godot::Vector3 &p_local ) const;
 
+        /// The shared world frame (see GlobeFrame): georeference frame when one is an
+        /// ancestor, otherwise Y-up ECEF with the flip baked in. Everything this node
+        /// draws and every geography answer is expressed through it, which is what keeps
+        /// the globe aligned with sibling Tileset3D content.
+        mutable GlobeFrame frame_{};
+        mutable bool frame_resolved_ = false;
+
+        const GlobeFrame &frame() const;
+
         /// The Georeference3D this globe shares a frame with, or null when it is using
         /// its own fallback frame. Mirrors Tileset3D::find_georeference.
         const Georeference3D *find_georeference() const;
@@ -91,27 +130,31 @@ namespace tiles3d
     private:
         int radial_segments_ = 64;
         int rings_ = 32;
-        godot::Color base_color_{ 0.09f, 0.16f, 0.32f, 1.0f };
+        // A mid blue that reads as an ocean-covered planet under a single directional light.
+        // Earlier values around (0.09, 0.16, 0.32) looked nearly black once the tonemapper
+        // and the terminator were applied; this keeps the lit side legible.
+        godot::Color base_color_{ 0.22f, 0.42f, 0.72f, 1.0f };
         godot::Ref<godot::Texture2D> albedo_texture_;
         bool show_graticule_ = true;
 
+        bool show_atmosphere_ = true;
+        double atmosphere_scale_ = 1.06;
+        godot::Color atmosphere_color_{ 0.30f, 0.55f, 1.0f, 1.0f };
+        double atmosphere_intensity_ = 2.4;
+        // High enough that the glow reads as a band on the limb rather than a haze over the
+        // whole disc. Lower values wash the night side grey, since the shell is additive.
+        double atmosphere_falloff_ = 8.0;
+
         godot::MeshInstance3D *surface_ = nullptr;
         godot::MeshInstance3D *graticule_ = nullptr;
-
-        /// Cached fallback frame, built lazily. Only consulted when there is no
-        /// Georeference3D ancestor.
-        mutable bool fallback_frame_built_ = false;
-        mutable math::Mat4 fallback_ecef_to_local_{};
-
-        /// ECEF -> this node's local frame. Georeference3D when present, else the
-        /// fallback. This is the only place the two paths differ.
-        math::Mat4 ecef_to_local_matrix() const;
+        godot::MeshInstance3D *atmosphere_ = nullptr;
 
         /// Creates the Surface and Graticule children on first use. Idempotent.
         void ensure_children();
 
         void rebuild_surface();
         void rebuild_graticule();
+        void rebuild_atmosphere();
         void update_materials();
     };
 

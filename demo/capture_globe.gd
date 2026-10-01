@@ -53,7 +53,13 @@ func _ready() -> void:
 				max_v = max_v.max(v)
 
 			var center := (min_v + max_v) * 0.5
-			_check(center.length() < 1.0, "mesh centred on local origin (|c|=%.3f)" % center.length())
+			# The invariant that actually matters: whatever the frame is, the ellipsoid the
+			# camera is told to orbit must be the ellipsoid that was drawn. These drifted
+			# apart once (mesh in Y-up ECEF, frame origin from a Z-up ENU frame) and the
+			# camera framed a point one Earth radius off centre.
+			_check(center.distance_to(globe.ecef_to_local(Vector3.ZERO)) < 1.0,
+				"mesh centre is the resolved ellipsoid centre (d=%.3f)" %
+				center.distance_to(globe.ecef_to_local(Vector3.ZERO)))
 			_check(absf(min_v.y + 6356752.3) < 50.0,
 				"south pole at -C (y_min=%.1f)" % min_v.y)
 			_check(absf(max_v.y - 6356752.3) < 50.0,
@@ -61,13 +67,14 @@ func _ready() -> void:
 			_check(absf(max_v.x - 6378137.0) < 50.0,
 				"equator reaches +A on X (x_max=%.1f)" % max_v.x)
 
-	# Geography API checks: a point at lon 0, lat 0 must sit at +X in the fallback frame
-	# (the frame origin is the same spot, so the local result is the origin itself), and
-	# lon +90 must be on -Z (the no-mirror requirement).
+	# Geography API checks. With no Georeference3D the local origin is the Earth's centre, so
+	# geodetic coordinates come back as Y-up ECEF: lon 0 on +X, lon +90 on -Z (the
+	# no-mirror requirement), lat 90 on +Y.
 	var lon0: Vector3 = globe.geodetic_to_local(0.0, 0.0, 0.0)
 	var lon90: Vector3 = globe.geodetic_to_local(90.0, 0.0, 0.0)
 	var north: Vector3 = globe.geodetic_to_local(0.0, 90.0, 0.0)
-	_check(absf(lon0.length()) < 1.0, "lon0/lat0 maps to the frame origin (|v|=%.3f)" % lon0.length())
+	_check(absf(lon0.x - 6378137.0) < 50.0 and absf(lon0.z) < 50.0,
+		"lon0/lat0 is at +A on X (%.1f, %.1f, %.1f)" % [lon0.x, lon0.y, lon0.z])
 	_check(north.y > 6356752.0, "lon0/lat90 is at +Y (y=%.1f)" % north.y)
 	# Relative to lon0, lon+90 should be strongly negative on Z.
 	var east_delta: Vector3 = lon90 - lon0
