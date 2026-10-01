@@ -8,6 +8,8 @@
 #include "godot_cpp/godot.hpp"
 
 #include "Georeference3D.h"
+#include "Globe3D.h"
+#include "GlobeCameraController.h"
 #include "Godot3DTiles.h"
 #include "OriginAuthority.h"
 #include "Tileset3D.h"
@@ -41,6 +43,14 @@ namespace
         // and 4 of docs/REFACTOR_PLAN.md.
         godot::ClassDB::register_class<Georeference3D>();
         godot::ClassDB::register_class<Tileset3D>();
+
+        // The virtual Earth. Globe3D resolves the georeference the same way Tileset3D does,
+        // so it is a sibling of the tilesets rather than their parent (docs/GLOBE_PLAN.md 3).
+        godot::ClassDB::register_class<Globe3D>();
+
+        // Trackball camera for the globe. It extends Camera3D so a scene can use it in place
+        // of a plain camera (docs/GLOBE_PLAN.md P3).
+        godot::ClassDB::register_class<GlobeCameraController>();
     }
 
     /// @brief Called by Godot to let us do any cleanup.

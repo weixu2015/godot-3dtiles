@@ -1,0 +1,16 @@
+[gd_scene load_steps=2 format=3 uid="uid://cglobecamp3scene"]
+
+[ext_resource type="Script" path="res://camera_p3.gd" id="1_p3"]
+
+[node name="CameraP3" type="Node3D"]
+script = ExtResource("1_p3")
+
+[node name="Globe3D" type="Globe3D" parent="."]
+radial_segments = 64
+rings = 32
+show_graticule = true
+
+[node name="GlobeCameraController" type="GlobeCameraController" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 20000000)
+far = 200000000.0
+near = 100.0

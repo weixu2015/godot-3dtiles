@@ -44,6 +44,20 @@ namespace tiles3d::math
             ( ( 1.0 - kWgs84EccentricitySquared ) * primeVerticalRadius + height ) * sinLat );
     }
 
+    Vec3 geodeticToYUp( double longitude, double latitude, double height )
+    {
+        // Matches tileScheme.ts cartographicToXYZ exactly, including the negative Z. The
+        // reference uses a spherical approximation here (semi-major for the equatorial
+        // term, semi-minor for the polar one) rather than the full geodetic form; keeping
+        // the same shape means the ported quadtree geometry lands on the same surface.
+        const double cosLat = std::cos( latitude );
+        const double sinLat = std::sin( latitude );
+
+        return Vec3( ( kWgs84SemiMajorAxis + height ) * cosLat * std::cos( longitude ),
+                     ( kWgs84SemiMinorAxis + height ) * sinLat,
+                     -( kWgs84SemiMajorAxis + height ) * cosLat * std::sin( longitude ) );
+    }
+
     Vec3 wgs84SurfaceNormal( double longitude, double latitude )
     {
         const double cosLat = std::cos( latitude );

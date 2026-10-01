@@ -19,10 +19,23 @@ namespace tiles3d::math
     /// WGS84 semi-major axis, metres (consts.ts WGS84_A).
     inline constexpr double kWgs84SemiMajorAxis = 6378137.0;
 
+    /// WGS84 semi-minor axis (polar radius), metres. The reference globe implementation
+    /// names this C, and uses A/B for the two equatorial radii (A == B == semi-major).
+    inline constexpr double kWgs84SemiMinorAxis = 6356752.314;
+
     /// WGS84 first eccentricity squared (consts.ts WGS84_E2).
     inline constexpr double kWgs84EccentricitySquared = 0.00669437999013;
 
     inline constexpr double kPi = 3.14159265358979323846;
+
+    /// Earth mean radius (A + B + C) / 3, metres. The globe camera uses this to derive its
+    /// maximum orbit distance.
+    inline constexpr double kWgs84MeanRadius =
+        ( kWgs84SemiMajorAxis + kWgs84SemiMajorAxis + kWgs84SemiMinorAxis ) / 3.0;
+
+    /// Largest latitude a Web Mercator tiling scheme covers, atan(sinh(pi)) ~= 85.0511 deg.
+    inline const double kWebMercatorMaxLatitude = 1.4844222297453324;
+
 
     /// A 3D Tiles `region` bounding volume: EPSG:4979 geodetic extents in radians and
     /// metres, ordered [west, south, east, north, minHeight, maxHeight].
@@ -58,8 +71,20 @@ namespace tiles3d::math
     /// Geodetic (radians, metres above the ellipsoid) to ECEF cartesian.
     Vec3 wgs84ToCartesian( double longitude, double latitude, double height );
 
+    /// Geodetic to ECEF in a frame whose polar axis is **Y**, matching the reference globe
+    /// implementation (tileScheme.ts cartographicToXYZ) and therefore Godot's Y-up world.
+    ///
+    /// The Z component carries a deliberate minus sign:
+    ///   x =  (A + h) cos(lat) cos(lon)
+    ///   y =  (C + h) sin(lat)
+    ///   z = -(B + h) cos(lat) sin(lon)
+    /// Dropping that sign mirrors the globe east-west, because the right-handed rotation
+    /// about +Y is clockwise seen from the north pole.
+    Vec3 geodeticToYUp( double longitude, double latitude, double height );
+
     /// Unit surface normal of the ellipsoid at (longitude, latitude).
     Vec3 wgs84SurfaceNormal( double longitude, double latitude );
+
 
     /// Divides by the length, but returns the input unchanged when the length is zero.
     /// Mirrors the reference `normalize3` (`hypot(...) || 1`), which avoids NaN where
