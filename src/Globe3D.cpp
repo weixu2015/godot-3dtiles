@@ -736,22 +736,20 @@ namespace tiles3d
     Vector3 Globe3D::local_to_geodetic( const Vector3 &p_local ) const
     {
         // Invert geodetic_to_local: local -> Z-up ECEF -> geodetic.
+        //
+        // The inverse has to go through the same ellipsoid the forward conversion uses -
+        // cartesianToWgs84. Deriving latitude here by hand gave *geocentric* latitude
+        // (atan2(z, p)) and a height of |v| - semiMajorAxis, which is not the geodetic pair
+        // the class documents and is not the inverse of geodetic_to_local: at 40 degrees the
+        // two latitudes differ by 0.19 degrees, about 21 km on the ground, and the height is
+        // off by several hundred metres. Anything comparing a position against a published
+        // coordinate (a dataset's own longitude/latitude, say) read that as a placement bug.
         const math::Vec3 ecef = frame().to_ecef_z_up( fromGodotVector( p_local ) );
+        const math::Vec3 geodetic = math::cartesianToWgs84( ecef );
 
-        const double x = ecef.x;
-        const double y = ecef.y;
-        const double z = ecef.z;
-        const double p = std::sqrt( x * x + y * y );
-
-        // Kernel convention: +Z is the pole, lon 0 is +X and lat is measured from the
-        // equatorial plane.
-        const double longitude = std::atan2( y, x );
-        const double latitude = std::atan2( z, p );
-        const double height = std::sqrt( x * x + y * y + z * z ) - math::kWgs84SemiMajorAxis;
-
-        return Vector3( static_cast<float>( longitude * kRadiansToDegrees ),
-                        static_cast<float>( latitude * kRadiansToDegrees ),
-                        static_cast<float>( height ) );
+        return Vector3( static_cast<float>( geodetic.x * kRadiansToDegrees ),
+                        static_cast<float>( geodetic.y * kRadiansToDegrees ),
+                        static_cast<float>( geodetic.z ) );
     }
 
     const Georeference3D *Globe3D::find_georeference() const

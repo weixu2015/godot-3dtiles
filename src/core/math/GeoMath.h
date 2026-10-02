@@ -85,6 +85,18 @@ namespace tiles3d::math
     /// Unit surface normal of the ellipsoid at (longitude, latitude).
     Vec3 wgs84SurfaceNormal( double longitude, double latitude );
 
+    /// ECEF cartesian (Z-up, metres from the ellipsoid centre) back to geodetic.
+    ///
+    /// The inverse of wgs84ToCartesian(), so a tile world matrix can be turned back into the
+    /// longitude/latitude/height it actually places its content at. That is what makes a
+    /// mis-georeferenced dataset visible: a tileset whose `root.transform` puts it in the
+    /// wrong province still loads, still reports every tile as loaded, and still renders
+    /// nothing on screen, because it is simply somewhere else.
+    ///
+    /// Bowring's closed-form solution: three iterations of the standard formula, accurate to
+    /// well under a millimetre for any point outside the inner ellipsoid.
+    Vec3 cartesianToWgs84( const Vec3 &ecef_z_up );
+
 
     /// Divides by the length, but returns the input unchanged when the length is zero.
     /// Mirrors the reference `normalize3` (`hypot(...) || 1`), which avoids NaN where

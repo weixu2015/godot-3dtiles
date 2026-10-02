@@ -24,8 +24,12 @@ ssao_enabled = false
 glow_enabled = false
 
 [sub_resource type="LongitudeLatitudeHeight" id="LLH_anchor"]
-longitude = 120.97
-latitude = 23.5
+; Anchor = the 3D Tiles dataset's own origin (the Photogrammetry block). The georeference
+; origin has to sit on the dataset: every tile coordinate is measured from it, and a
+; dataset 12 000 km away lands at |coord| ~ 1.2e7, where float32 quantises to ~1 m.
+; Switch this back to 120.97 / 23.5 when the taiwan tileset is the one loaded below.
+longitude = -75.596707
+latitude = 40.038796
 height = 0.0
 
 [node name="GlobeMain" type="Node3D"]
@@ -40,6 +44,10 @@ light_energy = 1.5
 shadow_enabled = false
 
 [node name="Georeference3D" type="Georeference3D" parent="."]
+; Z-up -> Y-up: M(v) = (vx, vz, -vy). The frame this node carries is ENU (Z-up, as the
+; kernel's eastNorthUpToFixedFrame emits); this transform is what makes the *world* the
+; Y-up space Godot and the camera controller expect - the same transform node_3d.tscn uses.
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
 origin_authority = SubResource("LLH_anchor")
 
 [node name="Globe3D" type="Globe3D" parent="Georeference3D"]
@@ -53,11 +61,30 @@ atmosphere_intensity = 2.4
 atmosphere_falloff = 8.0
 
 [node name="GlobeTileLayer" type="GlobeTileLayer" parent="Georeference3D"]
+print_telemetry = true
 
 [node name="Tileset3D" type="Tileset3D" parent="Georeference3D"]
-url = "E:/GISData/3D Tiles/taiwan/tileset.json"
+url = "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
 debug_show_bounding_volume = false
 
 [node name="GlobeCameraController" type="GlobeCameraController" parent="."]
 far = 200000000.0
 near = 1000.0
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="MarginContainer" parent="HUD"]
+offset_left = 12.0
+offset_top = 12.0
+offset_right = 332.0
+offset_bottom = 136.0
+
+[node name="Box" type="VBoxContainer" parent="HUD/Panel"]
+theme_override_constants/separation = 6
+
+[node name="HomeButton" type="Button" parent="HUD/Panel/Box"]
+text = "Home: fly to the 3D Tiles dataset"
+
+[node name="Status" type="Label" parent="HUD/Panel/Box"]
+text = "Tileset3D loading..."
+autowrap_mode = 2

@@ -14,6 +14,9 @@
 #include "godot_cpp/classes/scene_tree.hpp"
 #include "godot_cpp/classes/time.hpp"
 #include "godot_cpp/classes/viewport.hpp"
+// Needed for the Window -> Node upcast: SceneTree::get_root() declares its return type
+// only through this header, and without it the georeference search below does not compile.
+#include "godot_cpp/classes/window.hpp"
 #include "godot_cpp/core/class_db.hpp"
 #include "godot_cpp/variant/quaternion.hpp"
 
@@ -52,14 +55,61 @@ namespace tiles3d
         constexpr double kTiltHorizontalSign = 1.0;
         constexpr double kTiltVerticalSign = 1.0;
 
-        constexpr double kWheelImpulse = 0.5;
-        constexpr double kWheelMaxLogVelocity = 2.5;
-        constexpr double kWheelDamping = 2.5;
-        constexpr double kWheelStopThreshold = 0.02;
+        // Wheel zoom, expressed in log-distance so one notch is a fixed zoom ratio at any
+        // altitude (the reference integrates in log space for the same reason). Note how the
+        // damping divides out of every one of these: the impulse and the stop threshold are
+        // scaled by it, so `zoom_inertia_damping` only changes how quickly the zoom settles,
+        // never how far one notch or one flick travels. Tuning feel must not silently change
+        // locomotion.
+        constexpr double kLogDistancePerNotch = 0.2;  // e^0.2 per notch, about 1.22x
+        constexpr double kMaxFlickLogTravel = 1.0;    // cap on one flick, about 2.7x
+        constexpr double kStopFlickLogTravel = 0.15;  // settle once this little is left
 
-        constexpr double kInertiaSpinCoef = 0.9;
         constexpr double kInertiaMaxClickTime = 0.4;
         constexpr double kInertiaStopFactor = 0.001;
+
+        /// How much of an atmosphere shell the far plane has to cover past the ellipsoid.
+        /// Globe3D defaults to 1.06 radii, so 1.2 has room to spare.
+        constexpr double kAtmosphereHeadroom = 1.2;
+
+        /// Rotation-based direction interpolation that survives the near-antipodal case.
+        ///
+        /// Godot's Vector3::slerp builds its axis out of cross(from, to), which collapses to
+        /// zero when the two are nearly opposite - and flying between two points on opposite
+        /// sides of the planet is the normal case here (Taiwan to Philadelphia is about 160
+        /// degrees apart). The result was a random-looking jump instead of a flight.
+        godot::Vector3 slerp_direction( const godot::Vector3 &p_from, const godot::Vector3 &p_to,
+                                        const double p_t )
+        {
+            const godot::Vector3 from = p_from.normalized();
+            const godot::Vector3 to = p_to.normalized();
+            const double raw_dot = static_cast<double>( from.dot( to ) );
+            const double dot = raw_dot < -1.0 ? -1.0 : ( raw_dot > 1.0 ? 1.0 : raw_dot );
+
+            if ( dot > 0.9995 )
+            {
+                return from.lerp( to, static_cast<float>( p_t ) ).normalized();
+            }
+
+            godot::Vector3 axis = from.cross( to );
+            if ( axis.length_squared() < 1e-12 )
+            {
+                // Antipodal: no axis is preferred, so take any perpendicular one. The flight
+                // then sweeps a half turn, which is what "the other side of the planet" means.
+                axis = from.cross( godot::Vector3( 0.0f, 0.0f, 1.0f ) );
+                if ( axis.length_squared() < 1e-12 )
+                {
+                    axis = from.cross( godot::Vector3( 0.0f, 1.0f, 0.0f ) );
+                }
+            }
+            axis = axis.normalized();
+
+            const double angle = std::acos( dot ) * p_t;
+            // Rodrigues about `axis`.
+            return ( from * static_cast<float>( std::cos( angle ) ) +
+                     axis.cross( from ) * static_cast<float>( std::sin( angle ) ) )
+                .normalized();
+        }
 
         double clampd( const double value, const double low, const double high )
         {
@@ -135,9 +185,55 @@ namespace tiles3d
                                PropertyInfo( Variant::FLOAT, "zoom_speed_scale" ),
                                "set_zoom_speed_scale", "get_zoom_speed_scale" );
 
+        ClassDB::bind_method( D_METHOD( "set_drag_inertia_coefficient", "p_seconds" ),
+                              &GlobeCameraController::set_drag_inertia_coefficient );
+        ClassDB::bind_method( D_METHOD( "get_drag_inertia_coefficient" ),
+                              &GlobeCameraController::get_drag_inertia_coefficient );
+        ClassDB::add_property(
+            "GlobeCameraController",
+            PropertyInfo( Variant::FLOAT, "drag_inertia_coefficient", godot::PROPERTY_HINT_RANGE,
+                          "0,5,0.01" ),
+            "set_drag_inertia_coefficient", "get_drag_inertia_coefficient" );
+
+        ClassDB::bind_method( D_METHOD( "set_drag_inertia_max_time", "p_seconds" ),
+                              &GlobeCameraController::set_drag_inertia_max_time );
+        ClassDB::bind_method( D_METHOD( "get_drag_inertia_max_time" ),
+                              &GlobeCameraController::get_drag_inertia_max_time );
+        ClassDB::add_property(
+            "GlobeCameraController",
+            PropertyInfo( Variant::FLOAT, "drag_inertia_max_time", godot::PROPERTY_HINT_RANGE,
+                          "0,10,0.05" ),
+            "set_drag_inertia_max_time", "get_drag_inertia_max_time" );
+
+        ClassDB::bind_method( D_METHOD( "set_zoom_inertia_damping", "p_damping" ),
+                              &GlobeCameraController::set_zoom_inertia_damping );
+        ClassDB::bind_method( D_METHOD( "get_zoom_inertia_damping" ),
+                              &GlobeCameraController::get_zoom_inertia_damping );
+        ClassDB::add_property(
+            "GlobeCameraController",
+            PropertyInfo( Variant::FLOAT, "zoom_inertia_damping", godot::PROPERTY_HINT_RANGE,
+                          "0.5,30,0.1" ),
+            "set_zoom_inertia_damping", "get_zoom_inertia_damping" );
+
+        ClassDB::bind_method( D_METHOD( "use_reference_inertia" ),
+                              &GlobeCameraController::use_reference_inertia );
+
+        ClassDB::bind_method( D_METHOD( "set_manage_clip", "p_enabled" ),
+                              &GlobeCameraController::set_manage_clip );
+        ClassDB::bind_method( D_METHOD( "get_manage_clip" ),
+                              &GlobeCameraController::get_manage_clip );
+        ClassDB::add_property( "GlobeCameraController",
+                               PropertyInfo( Variant::BOOL, "manage_clip" ),
+                               "set_manage_clip", "get_manage_clip" );
+
         ClassDB::bind_method(
             D_METHOD( "set_camera_pose", "p_position", "p_direction", "p_up" ),
             &GlobeCameraController::set_camera_pose );
+        ClassDB::bind_method( D_METHOD( "fly_to", "p_longitude_degrees", "p_latitude_degrees",
+                                        "p_distance", "p_seconds" ),
+                              &GlobeCameraController::fly_to,
+                              DEFVAL( 1.2 ) );
+        ClassDB::bind_method( D_METHOD( "is_flying" ), &GlobeCameraController::is_flying );
         ClassDB::bind_method( D_METHOD( "get_camera_direction" ),
                               &GlobeCameraController::get_camera_direction );
         ClassDB::bind_method( D_METHOD( "get_camera_up" ), &GlobeCameraController::get_camera_up );
@@ -166,8 +262,12 @@ namespace tiles3d
                 sync_distance_from_camera();
                 break;
             case NOTIFICATION_PROCESS:
+                update_fly( get_process_delta_time() );
                 update_zoom_easing( get_process_delta_time() );
                 update_drag_inertia( get_process_delta_time() );
+                // After the pose update, so the planes match the frame that is about to be
+                // drawn rather than the previous one.
+                update_clip_planes();
                 break;
             default:
                 break;
@@ -206,6 +306,55 @@ namespace tiles3d
         return zoom_speed_scale_;
     }
 
+    void GlobeCameraController::set_drag_inertia_coefficient( const double p_seconds )
+    {
+        drag_inertia_coefficient_ = p_seconds;
+    }
+
+    double GlobeCameraController::get_drag_inertia_coefficient() const
+    {
+        return drag_inertia_coefficient_;
+    }
+
+    void GlobeCameraController::set_drag_inertia_max_time( const double p_seconds )
+    {
+        drag_inertia_max_time_ = p_seconds;
+    }
+
+    double GlobeCameraController::get_drag_inertia_max_time() const
+    {
+        return drag_inertia_max_time_;
+    }
+
+    void GlobeCameraController::set_zoom_inertia_damping( const double p_damping )
+    {
+        zoom_inertia_damping_ = p_damping;
+    }
+
+    double GlobeCameraController::get_zoom_inertia_damping() const
+    {
+        return zoom_inertia_damping_;
+    }
+
+    void GlobeCameraController::set_manage_clip( const bool p_enabled )
+    {
+        manage_clip_ = p_enabled;
+    }
+
+    bool GlobeCameraController::get_manage_clip() const
+    {
+        return manage_clip_;
+    }
+
+    void GlobeCameraController::use_reference_inertia()
+    {
+        // The web reference's coefficients: a 0.9 s spin decay with no hard stop, and a
+        // 2.5 /s zoom decay. Kept callable so the feel can be A/B'd against the page.
+        drag_inertia_coefficient_ = 0.9;
+        drag_inertia_max_time_ = 0.0; // 0 disables the cap
+        zoom_inertia_damping_ = 2.5;
+    }
+
     // ---- pivot / distance helpers ----
 
     double GlobeCameraController::min_distance()
@@ -222,55 +371,157 @@ namespace tiles3d
 
     const GlobeFrame &GlobeCameraController::frame() const
     {
-        // Re-resolve whenever the node moves in the tree; resolve() itself is cheap (the
-        // georeference caches its matrices) and keeps reparenting correct.
-        frame_ = GlobeFrame::resolve( this );
+        // Re-resolved on every use because the carrier node can be reparented at any time;
+        // resolve steps are cheap (the georeference caches its matrices).
+        //
+        // The frame MUST come from the same node the frame <-> parent conversions use. It
+        // used to come from resolve(this), which only walks ancestors: as a sibling of
+        // Georeference3D this node found nothing and fell back to "local space is Y-up
+        // ECEF", while the pivot and the conversions came from the anchor's ENU frame. The
+        // two differ by a rotation *and* a 6000 km translation, and a rotation preserves
+        // every length - so the distance, the SSE and the height above the ellipsoid all
+        // stayed right while the camera landed on the wrong side of the planet. Asking for
+        // Philadelphia arrived at lon 145 lat 62.
+        frame_ = GlobeFrame::from_carrier( resolve_frame_node() );
         frame_valid_ = true;
         return frame_;
     }
 
-    Vector3 GlobeCameraController::resolve_ellipsoid_center() const
+    // ---- frame space vs parent space ----
+    //
+    // The shared GlobeFrame speaks in its own local coordinates: an ENU frame anchored at the
+    // georeference origin, Z-up. The camera, however, is a *sibling* of Georeference3D (and of
+    // Globe3D), so get_position()/set_position() speak the parent space. When an explicit
+    // Georeference3D is present those two differ by that node's own transform - the Z-up ->
+    // Y-up flip lives there.
+    //
+    // Mixing them is nearly invisible: a rotation preserves lengths, so get_distance(),
+    // camera_height_above_ellipsoid(), the screen-space error and every distance-shaped test
+    // stayed correct. Only the *direction* came out wrong, which shows up as the camera
+    // landing at the wrong longitude and latitude - "fly to Philadelphia" arriving somewhere
+    // else entirely.
+
+    // Depth-first search for a Georeference3D anywhere under `node`. The camera is usually a
+    // *sibling* of the georeference rather than a descendant, so the ancestor walk in
+    // GlobeFrame::resolve() cannot see it - and falling back to a Globe3D frame there is what
+    // put flights on the wrong side of the planet (the two frames differ by a rotation, which
+    // preserves every distance and therefore hid from every distance-shaped test).
+    const Georeference3D *find_georeference_anywhere( const godot::Node *node )
     {
-        // The Earth's centre is the origin of ECEF. Find the frame that maps ECEF into this
-        // node's parent space, then ask where (0,0,0) lands.
-        //
-        // Both Globe3D and Tileset3D resolve their frame the same way, so walking the scene
-        // root for one of them and asking for its ecef_to_local is enough. The frame origin
-        // is on the ellipsoid, so ecef_to_local * (0,0,0) is the centre, roughly one Earth
-        // radius away.
+        if ( node == nullptr )
+        {
+            return nullptr;
+        }
+        if ( const Georeference3D *found = godot::Object::cast_to<Georeference3D>( node ) )
+        {
+            return found;
+        }
+        for ( int i = 0; i < node->get_child_count(); ++i )
+        {
+            if ( const Georeference3D *found =
+                     find_georeference_anywhere( node->get_child( i ) ) )
+            {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+
+    const godot::Node3D *GlobeCameraController::resolve_frame_node() const
+    {
+        if ( const Georeference3D *reference = find_frame_ancestor( this ); reference != nullptr )
+        {
+            return reference;
+        }
+
+        // The camera is a sibling of Georeference3D in the supported scene layout, so the
+        // ancestor walk above cannot find it. Search the whole tree before falling back to a
+        // Globe3D frame: those two frames differ by a rotation and mixing them is the bug.
+        if ( const godot::SceneTree *tree = get_tree(); tree != nullptr )
+        {
+            if ( const Georeference3D *reference =
+                     find_georeference_anywhere( tree->get_root() ) )
+            {
+                return reference;
+            }
+        }
+
         godot::Node *root = get_parent();
         while ( root != nullptr && root->get_parent() != nullptr )
         {
             root = root->get_parent();
         }
-
-        // Prefer a Georeference3D ancestor (explicit multi-scene setup).
-        if ( const Georeference3D *reference = find_frame_ancestor( this ); reference != nullptr )
-        {
-            const math::Vec3 center =
-                math::transformPoint( reference->ecef_to_local(), math::Vec3( 0.0 ) );
-            return Vector3( static_cast<float>( center.x ), static_cast<float>( center.y ),
-                            static_cast<float>( center.z ) );
-        }
-
-        // Otherwise look for a Globe3D anywhere in the scene and use its frame.
         if ( root != nullptr )
         {
             if ( const Globe3D *globe = find_globe_recursive( root ); globe != nullptr )
             {
-                // Globe3D::ecef_to_local maps Y-up ECEF into the globe's local frame, whose
-                // origin is the ellipsoid surface point the frame was anchored at. Passing
-                // (0,0,0) (the Earth's centre in ECEF) therefore already yields the centre
-                // expressed in local coordinates - about one radius from the local origin.
-                // No negation: ecef_to_local already returns the frame-relative position.
-                return globe->ecef_to_local( Vector3( 0.0f, 0.0f, 0.0f ) );
+                return globe;
             }
         }
+        return nullptr;
+    }
 
-        // No globe in the scene: treat the parent origin as the pivot. Correct for a scene
-        // whose root is the Earth's centre, which is how the fallback frame is laid out when
-        // there is no georeference at all.
-        return Vector3( 0.0f, 0.0f, 0.0f );
+    Vector3 GlobeCameraController::frame_point_to_world( const Vector3 &p_frame_local ) const
+    {
+        const godot::Node3D *carrier = resolve_frame_node();
+        return carrier != nullptr ? carrier->to_global( p_frame_local ) : p_frame_local;
+    }
+
+    Vector3 GlobeCameraController::frame_point_to_parent( const Vector3 &p_frame_local ) const
+    {
+        const godot::Node3D *parent_3d = Object::cast_to<godot::Node3D>( get_parent() );
+        const Vector3 world = frame_point_to_world( p_frame_local );
+        return parent_3d != nullptr ? parent_3d->to_local( world ) : world;
+    }
+
+    Vector3 GlobeCameraController::frame_point_from_parent( const Vector3 &p_parent_local ) const
+    {
+        // Inverse of frame_point_to_parent(). The camera's own position lives in parent
+        // space, so anything fed back into the frame's matrices (height above the
+        // ellipsoid, the horizon test) has to come through here first. The two spaces
+        // coincide only while the frame carrier's transform is identity - which is exactly
+        // the assumption that silently breaks when Georeference3D carries the Z-up -> Y-up
+        // flip.
+        const godot::Node3D *carrier = resolve_frame_node();
+        const godot::Node3D *parent_3d = Object::cast_to<godot::Node3D>( get_parent() );
+        if ( carrier == nullptr || parent_3d == nullptr )
+        {
+            return p_parent_local;
+        }
+        return carrier->to_local( parent_3d->to_global( p_parent_local ) );
+    }
+
+    Vector3 GlobeCameraController::frame_direction_to_parent(
+        const Vector3 &p_frame_direction ) const
+    {
+        const godot::Node3D *carrier = resolve_frame_node();
+        const godot::Node3D *parent_3d = Object::cast_to<godot::Node3D>( get_parent() );
+        if ( carrier == nullptr || parent_3d == nullptr )
+        {
+            return p_frame_direction;
+        }
+        // A direction has no translation, so carry a point one unit along it and keep the
+        // delta. Composing the bases by hand would work too, but this goes through the same
+        // Node3D transforms as everything else, so there is one code path to trust.
+        const Vector3 origin_parent = parent_3d->to_local( carrier->to_global( Vector3() ) );
+        const Vector3 tip_parent =
+            parent_3d->to_local( carrier->to_global( p_frame_direction ) );
+        return ( tip_parent - origin_parent ).normalized();
+    }
+
+    Vector3 GlobeCameraController::resolve_ellipsoid_center() const
+    {
+        // The Earth's centre is the origin of ECEF, so it is wherever the shared frame maps
+        // (0,0,0) - about one radius from the frame origin, which sits on the ellipsoid.
+        // Going through the same frame orbit_to()/fly_to() aim with is what guarantees the
+        // pivot and the directions are expressed in one coordinate system; deriving them
+        // separately is what made flights land in Siberia.
+        const GlobeFrame &globe_frame = frame();
+        const math::Vec3 center_local =
+            globe_frame.to_local( math::Vec3( 0.0 ) );
+        return frame_point_to_parent( Vector3( static_cast<float>( center_local.x ),
+                                               static_cast<float>( center_local.y ),
+                                               static_cast<float>( center_local.z ) ) );
     }
 
     Vector3 GlobeCameraController::resolve_pivot() const
@@ -302,64 +553,93 @@ namespace tiles3d
         enforce_camera_above_ellipsoid();
     }
 
+    void GlobeCameraController::update_clip_planes()
+    {
+        if ( !manage_clip_ )
+        {
+            return;
+        }
+
+        // One pair of clip planes cannot serve both ends of five orders of magnitude. The
+        // scene's fixed near = 1000 m is fine for the whole planet and useless for the
+        // dataset the Home button flies to: it puts a 400 m photogrammetry block entirely in
+        // front of the near plane, so the flight lands correctly and shows nothing.
+        //
+        // near tracks the altitude: 2% of it keeps anything larger than a fiftieth of the
+        // camera's height visible, which is comfortably outside every dataset while still
+        // leaving the depth buffer a far plane it can survive.
+        const double height = std::max( camera_height_above_ellipsoid(), 1.0 );
+        const double near_value = clampd( height * 0.02, 1.0, 1.0e6 );
+
+        // far only ever grows: the whole ellipsoid plus the atmosphere shell has to stay in
+        // the frustum from wherever the camera is, and no Scene author should have to know
+        // that number.
+        const Vector3 pivot = resolve_pivot();
+        const double centre_distance = static_cast<double>( ( get_position() - pivot ).length() );
+        const double required_far =
+            centre_distance + math::kWgs84SemiMajorAxis * kAtmosphereHeadroom;
+        if ( static_cast<double>( get_far() ) < required_far )
+        {
+            set_far( static_cast<float>( required_far ) );
+        }
+        set_near( static_cast<float>( near_value ) );
+    }
+
+    GlobeCameraController::EllipsoidOffset GlobeCameraController::ellipsoid_offset() const
+    {
+        // The camera offset from the ellipsoid centre, in Y-up ECEF metres, plus the
+        // scaled-space length that collapses the ellipsoid onto the unit sphere (the
+        // reference's trick for turning "inside the ellipsoid" into a scalar test).
+        //
+        // The camera position is a *parent space* vector while the frame's matrices want
+        // frame-local coordinates, so it is converted on the way in. Skipping that step is
+        // invisible while the frame carrier's transform is identity and rotates the
+        // measured direction by 90 degrees once it is not.
+        EllipsoidOffset result;
+        const GlobeFrame &globe_frame = frame();
+        const Vector3 camera_local = frame_point_from_parent( get_position() );
+        const math::Vec3 camera_ecef = globe_frame.to_ecef_z_up(
+            math::Vec3( camera_local.x, camera_local.y, camera_local.z ) );
+
+        // The pivot *is* the ECEF origin, so the offset from it needs no subtraction -
+        // converting the camera back to ECEF already measures it.
+        result.offset_y_up =
+            math::Vec3( camera_ecef.x, camera_ecef.z, -camera_ecef.y ); // Z-up -> Y-up
+        result.radius = glm::length( result.offset_y_up );
+        result.scaled_length = std::sqrt(
+            ( result.offset_y_up.x / math::kWgs84SemiMajorAxis ) *
+                ( result.offset_y_up.x / math::kWgs84SemiMajorAxis ) +
+            ( result.offset_y_up.y / math::kWgs84SemiMinorAxis ) *
+                ( result.offset_y_up.y / math::kWgs84SemiMinorAxis ) +
+            ( result.offset_y_up.z / math::kWgs84SemiMajorAxis ) *
+                ( result.offset_y_up.z / math::kWgs84SemiMajorAxis ) );
+        return result;
+    }
+
     double GlobeCameraController::camera_height_above_ellipsoid() const
     {
-        // Height above the ellipsoid via the reference's scaled-space trick: express the
-        // camera offset from the ellipsoid centre in Y-up ECEF metres, then divide by the
-        // per-axis radii so the ellipsoid becomes the unit sphere.
-        const GlobeFrame &globe_frame = frame();
-        const Vector3 pivot = resolve_pivot();
-        const Vector3 relative = get_position() - pivot;
-        const math::Vec3 centre_ecef =
-            globe_frame.to_ecef_z_up( math::Vec3( pivot.x, pivot.y, pivot.z ) );
-        const math::Vec3 camera_ecef = globe_frame.to_ecef_z_up( math::Vec3(
-            pivot.x + relative.x, pivot.y + relative.y, pivot.z + relative.z ) );
-        const math::Vec3 offset_y_up(
-            camera_ecef.x - centre_ecef.x,
-            camera_ecef.z - centre_ecef.z, // Z-up -> Y-up along the way
-            -( camera_ecef.y - centre_ecef.y ) );
-        const double scaledLength = std::sqrt(
-            ( offset_y_up.x / math::kWgs84SemiMajorAxis ) *
-                ( offset_y_up.x / math::kWgs84SemiMajorAxis ) +
-            ( offset_y_up.y / math::kWgs84SemiMinorAxis ) *
-                ( offset_y_up.y / math::kWgs84SemiMinorAxis ) +
-            ( offset_y_up.z / math::kWgs84SemiMajorAxis ) *
-                ( offset_y_up.z / math::kWgs84SemiMajorAxis ) );
-        if ( scaledLength <= 0.0 )
+        const EllipsoidOffset offset = ellipsoid_offset();
+        if ( offset.scaled_length <= 0.0 )
         {
             return 0.0;
         }
-
-        const double radius = glm::length( offset_y_up );
-        return radius * ( 1.0 - 1.0 / scaledLength );
+        return offset.radius * ( 1.0 - 1.0 / offset.scaled_length );
     }
 
     void GlobeCameraController::enforce_camera_above_ellipsoid()
     {
-        const GlobeFrame &globe_frame = frame();
-        const Vector3 pivot = resolve_pivot();
-        Vector3 relative = get_position() - pivot;
-        const math::Vec3 centre_ecef =
-            globe_frame.to_ecef_z_up( math::Vec3( pivot.x, pivot.y, pivot.z ) );
-        const math::Vec3 camera_ecef = globe_frame.to_ecef_z_up( math::Vec3(
-            pivot.x + relative.x, pivot.y + relative.y, pivot.z + relative.z ) );
-        const math::Vec3 offset_y_up(
-            camera_ecef.x - centre_ecef.x,
-            camera_ecef.z - centre_ecef.z, // Z-up -> Y-up along the way
-            -( camera_ecef.y - centre_ecef.y ) );
-        const double scaledLength = std::sqrt(
-            ( offset_y_up.x / math::kWgs84SemiMajorAxis ) *
-                ( offset_y_up.x / math::kWgs84SemiMajorAxis ) +
-            ( offset_y_up.y / math::kWgs84SemiMinorAxis ) *
-                ( offset_y_up.y / math::kWgs84SemiMinorAxis ) +
-            ( offset_y_up.z / math::kWgs84SemiMajorAxis ) *
-                ( offset_y_up.z / math::kWgs84SemiMajorAxis ) );
+        const EllipsoidOffset offset = ellipsoid_offset();
+        const double scaledLength = offset.scaled_length;
+        const double radius = offset.radius;
         if ( scaledLength <= 0.0 )
         {
             return;
         }
 
-        const double radius = glm::length( offset_y_up );
+        // Push the camera back out along the same radial direction it is already on, so the
+        // correction does not rotate the view.
+        const Vector3 pivot = resolve_pivot();
+        Vector3 relative = get_position() - pivot;
         const double height = radius * ( 1.0 - 1.0 / scaledLength );
         if ( height < kMinCameraHeight )
         {
@@ -466,16 +746,17 @@ namespace tiles3d
         // The reference integrates in log-distance so zoom feels linear across five orders of
         // magnitude, and the process delta time plays the role of its clamped frame time.
         const double dt = std::min( p_delta, 0.05 );
+        const double damping = std::max( zoom_inertia_damping_, 0.1 );
         wheel_log_distance_ += wheel_log_velocity_ * dt * zoom_speed_scale_;
         wheel_log_distance_ = std::max( wheel_log_distance_, std::log( min_distance() ) );
-        wheel_log_velocity_ *= std::exp( -kWheelDamping * dt );
+        wheel_log_velocity_ *= std::exp( -damping * dt );
 
         const double distance = std::exp( wheel_log_distance_ );
         const Vector3 pivot = resolve_pivot();
         set_position( pivot + wheel_radial_direction_ * static_cast<float>( distance ) );
         sync_distance_from_camera();
 
-        if ( std::abs( wheel_log_velocity_ ) < kWheelStopThreshold )
+        if ( std::abs( wheel_log_velocity_ ) < kStopFlickLogTravel * damping )
         {
             wheel_animating_ = false;
         }
@@ -497,7 +778,16 @@ namespace tiles3d
             return;
         }
 
-        const double decay = inertia_decay( since_release, kInertiaSpinCoef );
+        // A hard stop on top of the exponential tail. The tail alone would need
+        // ln(1/0.001) x coefficient seconds to reach the old threshold - over six seconds at
+        // the reference's 0.9 s coefficient, which reads as the globe refusing to stop.
+        if ( drag_inertia_max_time_ > 0.0 && since_release > drag_inertia_max_time_ )
+        {
+            mouse_up_time_ = 0.0;
+            return;
+        }
+
+        const double decay = inertia_decay( since_release, drag_inertia_coefficient_ );
         if ( decay < kInertiaStopFactor )
         {
             mouse_up_time_ = 0.0;
@@ -583,18 +873,26 @@ namespace tiles3d
         const double latitude = p_latitude_degrees * ( math::kPi / 180.0 );
 
         // Position on the sphere of radius p_distance around the pivot, then look straight at
-        // the pivot with the north pole as up. The lon/lat direction is a Y-up ECEF
-        // direction; the shared frame rotates it into whatever the scene is using.
+        // the pivot with the north pole as up.
+        //
+        // The direction comes from to_local(wgs84ToCartesian(lon, lat, 0)) - the same path the
+        // globe mesh and every tile use to place themselves - rather than from
+        // local_direction(). Those two disagreed, and measurement settled which one is right:
+        // local_direction() put a camera asked for Philadelphia (75.6W 40N) at 145E 62N
+        // (Siberia) while keeping the radius correct, and everything placed through to_local()
+        // lands exactly where it should. Rather than trust a conversion that cannot be checked
+        // by eye, reuse the one that already is.
         const GlobeFrame &globe_frame = frame();
         const Vector3 pivot = resolve_pivot();
-        const math::Vec3 direction_ecef(
-            std::cos( latitude ) * std::cos( longitude ),
-            std::sin( latitude ),
-            -std::cos( latitude ) * std::sin( longitude ) );
-        const math::Vec3 direction_local = globe_frame.local_direction( direction_ecef );
-        const Vector3 surface_direction( static_cast<float>( direction_local.x ),
-                                         static_cast<float>( direction_local.y ),
-                                         static_cast<float>( direction_local.z ) );
+        const math::Vec3 surface_local =
+            globe_frame.to_local( math::wgs84ToCartesian( longitude, latitude, 0.0 ) );
+        const math::Vec3 center_local = globe_frame.ellipsoid_center_local();
+        const math::Vec3 direction_local =
+            math::normalizeSafe( surface_local - center_local );
+        const Vector3 surface_direction = frame_direction_to_parent(
+            Vector3( static_cast<float>( direction_local.x ),
+                     static_cast<float>( direction_local.y ),
+                     static_cast<float>( direction_local.z ) ) );
 
         const Vector3 position = pivot + surface_direction * static_cast<float>( p_distance );
         set_position( position );
@@ -616,6 +914,100 @@ namespace tiles3d
         }
         look_at( world_pivot, up );
         distance_ = p_distance;
+        fly_active_ = false;
+    }
+
+    void GlobeCameraController::fly_to( const double p_longitude_degrees,
+                                       const double p_latitude_degrees, const double p_distance,
+                                       const double p_seconds )
+    {
+        if ( p_seconds <= 0.0 )
+        {
+            orbit_to( p_longitude_degrees, p_latitude_degrees, p_distance );
+            return;
+        }
+
+        const double longitude = p_longitude_degrees * ( math::kPi / 180.0 );
+        const double latitude = p_latitude_degrees * ( math::kPi / 180.0 );
+        // Same derivation as orbit_to: see the comment there for why not local_direction().
+        const GlobeFrame &globe_frame = frame();
+        const math::Vec3 surface_local =
+            globe_frame.to_local( math::wgs84ToCartesian( longitude, latitude, 0.0 ) );
+        const math::Vec3 direction_local =
+            math::normalizeSafe( surface_local - globe_frame.ellipsoid_center_local() );
+
+        const Vector3 pivot = resolve_pivot();
+        const Vector3 offset = get_position() - pivot;
+        const double current_distance = std::max( static_cast<double>( offset.length() ), 1.0 );
+
+        fly_start_direction_ = offset / static_cast<float>( current_distance );
+        fly_end_direction_ = frame_direction_to_parent(
+            Vector3( static_cast<float>( direction_local.x ),
+                     static_cast<float>( direction_local.y ),
+                     static_cast<float>( direction_local.z ) ) );
+        fly_start_distance_ = current_distance;
+        // The floor is the *local* surface radius under the target, not min_distance(): the
+        // latter is the polar radius times 1.01, which is 42 km of altitude everywhere on the
+        // planet and would leave a 400 m dataset as a speck. enforce_camera_above_ellipsoid()
+        // keeps the camera outside the ellipsoid wherever it ends up; this only has to stop
+        // the flight from burying it.
+        const double surface_distance =
+            glm::length( math::geodeticToYUp( longitude, latitude, 0.0 ) );
+        fly_end_distance_ = clampd( p_distance, surface_distance + kMinCameraHeight,
+                                    max_distance() );
+        fly_elapsed_ = 0.0;
+        fly_duration_ = p_seconds;
+        fly_active_ = true;
+
+        // A flight owns the camera while it runs.
+        wheel_animating_ = false;
+        mouse_up_time_ = 0.0;
+    }
+
+    bool GlobeCameraController::is_flying() const
+    {
+        return fly_active_;
+    }
+
+    void GlobeCameraController::update_fly( const double p_delta )
+    {
+        if ( !fly_active_ )
+        {
+            return;
+        }
+
+        fly_elapsed_ += p_delta;
+        const double t = clampd( fly_elapsed_ / std::max( fly_duration_, 1e-3 ), 0.0, 1.0 );
+        // Smoothstep: zero velocity at both ends, so the flight does not start or stop with a
+        // jerk the way a linear interpolation does.
+        const double ease = t * t * ( 3.0 - 2.0 * t );
+
+        const Vector3 direction =
+            slerp_direction( fly_start_direction_, fly_end_direction_, ease );
+        // Log-space distance: the same easing then reads as a constant zoom rate whether the
+        // flight spans a hundred metres or ten thousand kilometres.
+        const double distance = std::exp(
+            std::log( fly_start_distance_ ) +
+            ( std::log( fly_end_distance_ ) - std::log( fly_start_distance_ ) ) * ease );
+
+        const Vector3 pivot = resolve_pivot();
+        set_position( pivot + direction * static_cast<float>( distance ) );
+        distance_ = distance;
+
+        // Keep looking at the pivot; the up vector degenerates at the poles.
+        const godot::Node3D *parent_3d = Object::cast_to<godot::Node3D>( get_parent() );
+        const Vector3 world_pivot = parent_3d != nullptr ? parent_3d->to_global( pivot ) : pivot;
+        Vector3 up( 0.0f, 1.0f, 0.0f );
+        if ( std::abs( direction.y ) > 0.99f )
+        {
+            up = Vector3( 0.0f, 0.0f, 1.0f );
+        }
+        look_at( world_pivot, up );
+
+        if ( t >= 1.0 )
+        {
+            fly_active_ = false;
+        }
     }
 
     // ---- input ----
@@ -623,6 +1015,16 @@ namespace tiles3d
     void GlobeCameraController::_unhandled_input( const Ref<InputEvent> &p_event )
     {
         const InputEventMouseButton *button = Object::cast_to<InputEventMouseButton>( p_event.ptr() );
+        const InputEventMouseMotion *motion_event =
+            Object::cast_to<InputEventMouseMotion>( p_event.ptr() );
+        // Only real interaction takes the camera back; a window that gains focus emits a
+        // hover motion with a zero delta, and cancelling on that killed flights at random.
+        if ( button != nullptr ||
+             ( motion_event != nullptr && motion_event->get_relative().length_squared() > 0.0f ) )
+        {
+            fly_active_ = false;
+        }
+
         if ( button != nullptr )
         {
             if ( button->get_button_index() == MOUSE_BUTTON_LEFT )
@@ -684,9 +1086,13 @@ namespace tiles3d
                 wheel_radial_direction_ = radial;
 
                 const double direction = button->get_button_index() == MOUSE_BUTTON_WHEEL_UP ? -1.0 : 1.0;
-                wheel_log_velocity_ += direction * kWheelImpulse;
+                // Scaling by the damping is what keeps the travelled distance independent of
+                // it: the integrator divides velocity back out over the exponential tail.
+                const double damping = std::max( zoom_inertia_damping_, 0.1 );
+                const double max_velocity = kMaxFlickLogTravel * damping;
+                wheel_log_velocity_ += direction * kLogDistancePerNotch * damping;
                 wheel_log_velocity_ =
-                    clampd( wheel_log_velocity_, -kWheelMaxLogVelocity, kWheelMaxLogVelocity );
+                    clampd( wheel_log_velocity_, -max_velocity, max_velocity );
                 wheel_last_time_ = Time::get_singleton()->get_ticks_msec() / 1000.0;
             }
             return;

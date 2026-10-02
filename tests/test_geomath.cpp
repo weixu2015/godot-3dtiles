@@ -281,3 +281,52 @@ TEST_CASE( "eastNorthUpToFixedFrame maps local axes to east, north and up" )
     const Vec3 raised = transformPoint( frame, Vec3( 0.0, 0.0, 1500.0 ) );
     CHECK( std::abs( glm::length( raised - kAnchorEcef ) - 1500.0 ) < 1e-6 );
 }
+
+TEST_CASE( "cartesianToWgs84 inverts wgs84ToCartesian" )
+{
+    // Round trip: geodetic -> ECEF -> geodetic. This is what turns a tile's world matrix
+    // back into a longitude/latitude, i.e. what exposes a dataset that is georeferenced
+    // somewhere other than where its name suggests.
+    struct Sample
+    {
+        double lonDeg;
+        double latDeg;
+        double height;
+    };
+
+    const Sample samples[] = {
+        { 0.0, 0.0, 0.0 },          // equator / prime meridian
+        { 120.97, 23.5, 0.0 },      // the taiwan scene anchor
+        { 120.4057, 31.0788, 1712.1 }, // what that dataset's transform actually declares
+        { -74.006, 40.7128, 10.0 }, // western / northern hemisphere
+        { 179.9, -45.0, 3000.0 },   // near the antimeridian, southern
+        { 12.5, 89.9, 0.0 },        // close to the north pole
+    };
+
+    for ( const Sample &sample : samples )
+    {
+        const double lonRad = sample.lonDeg * kPi / 180.0;
+        const double latRad = sample.latDeg * kPi / 180.0;
+        const Vec3 ecef = wgs84ToCartesian( lonRad, latRad, sample.height );
+        const Vec3 back = cartesianToWgs84( ecef );
+
+        // Longitude is exact up to rounding; latitude and height are iterative.
+        CHECK( back.x * 180.0 / kPi == doctest::Approx( sample.lonDeg ).epsilon( 1e-12 ) );
+        CHECK( back.y * 180.0 / kPi == doctest::Approx( sample.latDeg ).epsilon( 1e-10 ) );
+        CHECK( back.z == doctest::Approx( sample.height ).epsilon( 1e-7 ) );
+    }
+}
+
+TEST_CASE( "cartesianToWgs84 handles the polar axis" )
+{
+    // p is zero exactly on the axis, which is the divide-by-zero the implementation
+    // short-circuits.
+    const Vec3 north = cartesianToWgs84( Vec3( 0.0, 0.0, kWgs84SemiMinorAxis ) );
+    CHECK( north.x == doctest::Approx( 0.0 ) );
+    CHECK( north.y == doctest::Approx( 0.5 * kPi ) );
+    CHECK( north.z == doctest::Approx( 0.0 ).epsilon( 1e-9 ) );
+
+    const Vec3 south = cartesianToWgs84( Vec3( 0.0, 0.0, -kWgs84SemiMinorAxis - 1000.0 ) );
+    CHECK( south.y == doctest::Approx( -0.5 * kPi ) );
+    CHECK( south.z == doctest::Approx( 1000.0 ).epsilon( 1e-9 ) );
+}

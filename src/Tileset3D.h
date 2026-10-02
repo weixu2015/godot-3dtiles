@@ -90,6 +90,11 @@ namespace tiles3d
 
         /// Bounding-sphere radius of the whole dataset, used for camera framing.
         double dataset_radius = 0.0;
+        // Filled by report_georeference() from the root transform; see the getters above.
+        double dataset_longitude_ = 0.0;
+        double dataset_latitude_ = 0.0;
+        double dataset_height_ = 0.0;
+        double anchor_separation_ = -1.0;
 
         /// Set after load; cleared once frame_camera() has run (editor framing only).
         bool needs_framing = false;
@@ -138,6 +143,12 @@ namespace tiles3d
         /// means the tileset uses its own implicit georeference (origin centred on its ECEF
         /// centre) - valid for a single tileset, forbidden when several share a scene.
         const Georeference3D *find_georeference() const;
+
+        /// Prints where the dataset's own transform places it (longitude/latitude/height)
+        /// and how far that is from the Georeference3D anchor, loudly when the two disagree.
+        /// A mis-georeferenced dataset is indistinguishable from a rendering bug otherwise:
+        /// it loads, every tile reports loaded, and the screen stays empty.
+        void report_georeference();
 
         /// ECEF -> render frame. With a Georeference3D ancestor this is that node's
         /// ecef_to_local(); without one it is the implicit frame (ENU at the dataset's own
@@ -211,6 +222,25 @@ namespace tiles3d
 
         /// Drops everything without loading.
         void unload();
+
+        // ---- where the dataset actually is ----
+        //
+        // Read from the tileset's own root transform, so they answer "where does this file
+        // place itself", not "where did the scene put it". That is the difference between a
+        // dataset that renders and one that loads every tile and shows nothing: fly to these
+        // and you land on the data whether or not the Georeference3D agrees.
+        //
+        // Valid after `tileset_loaded`. Zero before it.
+
+        double get_dataset_longitude() const;
+        double get_dataset_latitude() const;
+        /// Metres above the ellipsoid. Can be far from zero in a mis-georeferenced file.
+        double get_dataset_height() const;
+        /// Bounding sphere radius of the dataset, metres. 0 before load.
+        double get_dataset_radius() const;
+        /// Distance from the Georeference3D anchor to the dataset centre, metres. -1 when
+        /// there is no Georeference3D.
+        double get_anchor_separation() const;
 
         std::size_t get_tile_count() const;
         int get_maximum_depth() const;

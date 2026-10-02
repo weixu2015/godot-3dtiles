@@ -27,6 +27,7 @@
 
 #include "godot_cpp/classes/camera3d.hpp"
 #include "godot_cpp/classes/input_event.hpp"
+#include "godot_cpp/classes/node3d.hpp"
 #include "godot_cpp/variant/vector2.hpp"
 #include "godot_cpp/variant/vector3.hpp"
 
@@ -52,6 +53,37 @@ namespace tiles3d
         void set_zoom_speed_scale( double p_scale );
         double get_zoom_speed_scale() const;
 
+        // ---- inertia feel ----
+        //
+        // Every coefficient below is a time constant or a cap, so the *amount* of motion a
+        // gesture produces is independent of how crisp it feels. That is deliberate: the
+        // reference values (0.9 s spin decay, 2.5 zoom damping) let a drag keep spinning the
+        // globe for over six seconds and a wheel flick keep zooming for about two, which is
+        // unusable for inspecting a specific place.
+
+        /// Drag spin decay, seconds. Larger = longer glide after release.
+        void set_drag_inertia_coefficient( double p_seconds );
+        double get_drag_inertia_coefficient() const;
+
+        /// Hard stop for the drag spin, seconds after release. The exponential tail is cut
+        /// here regardless of how fast the drag was.
+        void set_drag_inertia_max_time( double p_seconds );
+        double get_drag_inertia_max_time() const;
+
+        /// Wheel zoom velocity decay, 1/seconds. Larger = the zoom settles sooner.
+        void set_zoom_inertia_damping( double p_damping );
+        double get_zoom_inertia_damping() const;
+
+        /// Restores the reference page's coefficients (0.9 / infinite / 2.5), for comparing
+        /// feel against the web implementation.
+        void use_reference_inertia();
+
+        /// Keeps near/far matched to the camera's altitude every frame. Without it a single
+        /// fixed pair has to serve both the whole planet and a 400 m dataset, and the
+        /// dataset loses: it ends up entirely in front of the near plane.
+        void set_manage_clip( bool p_enabled );
+        bool get_manage_clip() const;
+
         /// Camera pose API, for view synchronisation and automated tests.
         /// position/direction/up are in the camera's parent space; direction and up need
         /// not be orthogonal (they are orthonormalised here).
@@ -63,6 +95,15 @@ namespace tiles3d
         /// Snaps the camera to a standard pose looking at the globe: `distance` metres from
         /// the ellipsoid centre, `longitude`/`latitude` degrees, looking straight down.
         void orbit_to( double p_longitude_degrees, double p_latitude_degrees, double p_distance );
+
+        /// Same target as orbit_to(), but flown to over `seconds` instead of snapped: the
+        /// direction is slerped and the distance eased in log space, so a flight across five
+        /// orders of magnitude looks even. `seconds <= 0` falls back to a snap.
+        void fly_to( double p_longitude_degrees, double p_latitude_degrees, double p_distance,
+                     double p_seconds = 1.2 );
+
+        /// True while a fly_to() is in progress. Any user input cancels it.
+        bool is_flying() const;
 
         /// Distance from the ellipsoid centre, metres.
         double get_distance() const;
@@ -93,8 +134,12 @@ namespace tiles3d
         const GlobeFrame &frame() const;
 
         bool inertia_enabled_ = true;
+        bool manage_clip_ = true;
         double rotate_speed_scale_ = 1.0;
         double zoom_speed_scale_ = 1.0;
+        double drag_inertia_coefficient_ = 0.25;
+        double drag_inertia_max_time_ = 1.0;
+        double zoom_inertia_damping_ = 6.0;
 
         double distance_ = 0.0;
 
@@ -116,7 +161,26 @@ namespace tiles3d
         godot::Vector3 wheel_radial_direction_;
 
         godot::Vector3 resolve_pivot() const;
+
+        // ---- frame space vs parent space (see the definitions for the full story) ----
+        const godot::Node3D *resolve_frame_node() const;
+        godot::Vector3 frame_point_to_world( const godot::Vector3 &p_frame_local ) const;
+        godot::Vector3 frame_point_to_parent( const godot::Vector3 &p_frame_local ) const;
+        godot::Vector3 frame_point_from_parent( const godot::Vector3 &p_parent_local ) const;
+        godot::Vector3 frame_direction_to_parent( const godot::Vector3 &p_frame_direction ) const;
+
+        /// Camera offset from the ellipsoid centre in Y-up ECEF metres, with the scaled
+        /// length that turns the ellipsoid into the unit sphere. Shared by the height read
+        /// and the "keep the camera outside the planet" clamp so they cannot disagree.
+        struct EllipsoidOffset
+        {
+            math::Vec3 offset_y_up{};
+            double radius = 0.0;
+            double scaled_length = 0.0;
+        };
+        EllipsoidOffset ellipsoid_offset() const;
         void sync_distance_from_camera();
+        void update_clip_planes();
         void enforce_camera_above_ellipsoid();
         void rotate_camera_around( const godot::Vector3 &p_pivot, const godot::Vector3 &p_axis,
                                    double p_angle );
@@ -124,6 +188,17 @@ namespace tiles3d
         void apply_tilt_drag( double p_dx, double p_dy );
         void update_zoom_easing( double p_delta );
         void update_drag_inertia( double p_delta );
+        void update_fly( double p_delta );
+
+        // Fly-to state. Directions are unit vectors in the camera's parent space, the same
+        // space resolve_pivot() works in.
+        bool fly_active_ = false;
+        double fly_elapsed_ = 0.0;
+        double fly_duration_ = 0.0;
+        double fly_start_distance_ = 0.0;
+        double fly_end_distance_ = 0.0;
+        godot::Vector3 fly_start_direction_;
+        godot::Vector3 fly_end_direction_;
 
         /// Closest the camera may get to the ellipsoid centre (just above the polar radius).
         static double min_distance();

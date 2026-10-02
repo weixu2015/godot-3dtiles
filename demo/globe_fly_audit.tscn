@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cflyaudit1"]
+
+[ext_resource type="Script" path="res://globe_fly_audit.gd" id="1_audit"]
+
+[node name="GlobeFlyAudit" type="Node3D"]
+script = ExtResource("1_audit")

@@ -88,10 +88,36 @@ namespace tiles3d
         bool get_print_telemetry() const;
 
         /// Keep the editor viewport camera's near/far planes usable for a planetary scene.
-        /// The Godot editor rewrites them every frame, so without this the 6371 km globe is
-        /// clipped away by the 4000 m default and the editor viewport stays black.
+        ///
+        /// The editor's 3D viewport camera ships with near/far = 0.1 / 4000 m, and the
+        /// Viewport Settings dialog cannot express more than 1000000 m - less than the
+        /// Earth's 6375000 m radius. Without this the planet is always clipped away, and the
+        /// editor viewport stays black. The planes are re-asserted from the
+        /// RenderingServer frame_pre_draw hook rather than only from _process, because the
+        /// editor writes its own values during navigation and would otherwise hide the globe
+        /// for the whole inertia tail.
         void set_manage_editor_clip( bool p_value );
         bool get_manage_editor_clip() const;
+
+        /// Deterministic editor framing: longitude/latitude (degrees) and distance (metres)
+        /// of the opening pose. Changing any of them re-frames the editor viewport.
+        ///
+        /// The editor's free camera cannot navigate a planet: its navigation state is private
+        /// and its wheel step stays ~0.2 m no matter how far away the camera is (measured:
+        /// 5 wheel notches moved the camera 1 m from a 16000 km framing distance, so the size
+        /// on screen does not change). The layer learned the pose by writing the camera, the
+        /// editor did not. These properties are therefore the supported way to change the
+        /// editor view - run the scene to navigate with GlobeCameraController instead.
+        void set_editor_view_longitude( double p_value );
+        double get_editor_view_longitude() const;
+        void set_editor_view_latitude( double p_value );
+        double get_editor_view_latitude() const;
+        void set_editor_view_distance( double p_value );
+        double get_editor_view_distance() const;
+
+        /// Re-apply the editor framing pose right now, using the current editor_view_*
+        /// values. No-op outside the editor.
+        void reframe_editor_view();
 
         /// Debug outline around every rendered tile (the reference's tile overlay).
         void set_show_tile_bounds( bool p_value );
@@ -174,6 +200,25 @@ namespace tiles3d
         std::unordered_map<int, PendingRequest> pending_;
 
         // Per-frame camera state, expressed in this node's local frame (the mesh space).
+        // Opening pose for the editor viewport, also the demo's default viewpoint.
+        double editor_view_longitude_ = 105.0;
+        double editor_view_latitude_ = 25.0;
+        double editor_view_distance_ = 1.6e7;
+
+        /// Late re-assertion of the editor clip planes (see set_manage_editor_clip).
+        void _on_frame_pre_draw();
+        bool pre_draw_connected_ = false;
+
+        /// The editor's 3D viewport camera, or nullptr outside the editor / before it exists.
+        godot::Camera3D *resolve_editor_camera() const;
+        /// Writes the editor_view_* pose onto the editor camera. False when there is none.
+        bool apply_editor_framing();
+        /// Re-asserts near/far around the camera's current distance to the ellipsoid centre.
+        void assert_editor_clip( godot::Camera3D *p_camera );
+        /// Detaches the frame_pre_draw hook. RenderingServer outlives the scene, so a stale
+        /// connection would keep firing (and reporting errors) after the node is freed.
+        void disconnect_pre_draw();
+
         math::Vec3 camera_local_{ 0.0 };
         // Ellipsoid centre in this layer's local frame, refreshed each traversal so the
         // telemetry can say whether the camera is actually pointed at the planet.

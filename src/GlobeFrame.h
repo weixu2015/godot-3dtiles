@@ -26,6 +26,7 @@
 
 namespace godot
 {
+    class Node;
     class Node3D;
 }
 
@@ -37,6 +38,16 @@ namespace tiles3d
         /// Walks `node`'s ancestors for a Georeference3D and builds the shared frame.
         /// Cheap enough to call per frame (the georeference caches its matrices).
         static GlobeFrame resolve( const godot::Node3D *node );
+
+        /// The frame a node *beside* the carrier has to use.
+        ///
+        /// resolve() only walks ancestors, so a node that sits next to the Georeference3D
+        /// instead of under it - the globe camera, which is a sibling by design - gets the
+        /// fallback frame and then computes correct-looking distances to completely wrong
+        /// directions. This builds the frame from the node that actually carries it:
+        /// a Georeference3D contributes its ENU matrices, a Globe3D the frame it resolved
+        /// for itself. `carrier == nullptr` yields the same fallback as resolve().
+        static GlobeFrame from_carrier( const godot::Node *carrier );
 
         /// Z-up ECEF metres -> the node parent space the mesh is built in.
         math::Vec3 to_local( const math::Vec3 &ecef_z_up ) const;

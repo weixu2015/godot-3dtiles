@@ -18,6 +18,7 @@
 #include "godot_cpp/classes/mesh_instance3d.hpp"
 #include "godot_cpp/classes/object.hpp"
 #include "godot_cpp/classes/project_settings.hpp"
+#include "godot_cpp/classes/rendering_server.hpp"
 #include "godot_cpp/classes/standard_material3d.hpp"
 #include "godot_cpp/classes/sub_viewport.hpp"
 #include "godot_cpp/classes/texture2d.hpp"
@@ -200,6 +201,42 @@ namespace tiles3d
                                              godot::PROPERTY_HINT_MULTILINE_TEXT ),
                                "set_attribution", "get_attribution" );
 
+        ClassDB::bind_method( D_METHOD( "set_editor_view_longitude", "p_value" ),
+                              &GlobeTileLayer::set_editor_view_longitude );
+        ClassDB::bind_method( D_METHOD( "get_editor_view_longitude" ),
+                              &GlobeTileLayer::get_editor_view_longitude );
+        ClassDB::add_property(
+            "GlobeTileLayer",
+            PropertyInfo( godot::Variant::FLOAT, "editor_view_longitude",
+                          godot::PROPERTY_HINT_RANGE, "-180,180,0.01" ),
+            "set_editor_view_longitude", "get_editor_view_longitude" );
+
+        ClassDB::bind_method( D_METHOD( "set_editor_view_latitude", "p_value" ),
+                              &GlobeTileLayer::set_editor_view_latitude );
+        ClassDB::bind_method( D_METHOD( "get_editor_view_latitude" ),
+                              &GlobeTileLayer::get_editor_view_latitude );
+        ClassDB::add_property(
+            "GlobeTileLayer",
+            PropertyInfo( godot::Variant::FLOAT, "editor_view_latitude",
+                          godot::PROPERTY_HINT_RANGE, "-90,90,0.01" ),
+            "set_editor_view_latitude", "get_editor_view_latitude" );
+
+        ClassDB::bind_method( D_METHOD( "set_editor_view_distance", "p_value" ),
+                              &GlobeTileLayer::set_editor_view_distance );
+        ClassDB::bind_method( D_METHOD( "get_editor_view_distance" ),
+                              &GlobeTileLayer::get_editor_view_distance );
+        ClassDB::add_property(
+            "GlobeTileLayer",
+            PropertyInfo( godot::Variant::FLOAT, "editor_view_distance",
+                          godot::PROPERTY_HINT_RANGE, "1000,200000000,1000" ),
+            "set_editor_view_distance", "get_editor_view_distance" );
+
+        ClassDB::bind_method( D_METHOD( "reframe_editor_view" ),
+                              &GlobeTileLayer::reframe_editor_view );
+        // Bound so the RenderingServer frame_pre_draw Callable can resolve it by name.
+        ClassDB::bind_method( D_METHOD( "_on_frame_pre_draw" ),
+                              &GlobeTileLayer::_on_frame_pre_draw );
+
         ClassDB::bind_method( D_METHOD( "set_manage_editor_clip", "p_value" ),
                               &GlobeTileLayer::set_manage_editor_clip );
         ClassDB::bind_method( D_METHOD( "get_manage_editor_clip" ),
@@ -229,6 +266,7 @@ namespace tiles3d
         switch ( p_what )
         {
             case NOTIFICATION_READY:
+            {
                 // Same pattern as Tileset3D: the traversal runs through NOTIFICATION_PROCESS
                 // because godot-cpp does not expose _process as a virtual on Node. This also
                 // makes the layer work inside the editor - the editor scene tree is a real
@@ -237,7 +275,25 @@ namespace tiles3d
                 needs_framing_ = frame_editor_on_ready_ && Engine::get_singleton() != nullptr &&
                                  Engine::get_singleton()->is_editor_hint();
                 framing_frames_ = 0;
+#ifdef TILES3D_EDITOR_TARGET
+                // Re-assert the clip planes the instant before every frame is drawn: the
+                // editor writes its own 0.1/4000 during navigation, and a write from
+                // _process loses that race for the whole inertia tail.
+                Engine *ready_engine = Engine::get_singleton();
+                if ( ready_engine != nullptr && ready_engine->is_editor_hint() &&
+                     !pre_draw_connected_ )
+                {
+                    godot::RenderingServer *rs = godot::RenderingServer::get_singleton();
+                    if ( rs != nullptr )
+                    {
+                        rs->connect( "frame_pre_draw",
+                                     Callable( this, "_on_frame_pre_draw" ) );
+                        pre_draw_connected_ = true;
+                    }
+                }
+#endif
                 break;
+            }
 
             case NOTIFICATION_PROCESS:
                 if ( enabled_ )
@@ -274,10 +330,12 @@ namespace tiles3d
 
             case NOTIFICATION_EXIT_TREE:
                 cancel_pending_requests();
+                disconnect_pre_draw();
                 break;
 
             case NOTIFICATION_PREDELETE:
                 cancel_pending_requests();
+                disconnect_pre_draw();
                 destroy_roots();
                 break;
 
@@ -372,6 +430,61 @@ namespace tiles3d
     bool GlobeTileLayer::get_manage_editor_clip() const
     {
         return manage_editor_clip_;
+    }
+
+    void GlobeTileLayer::set_editor_view_longitude( const double p_value )
+    {
+        editor_view_longitude_ = p_value;
+        reframe_editor_view();
+    }
+
+    double GlobeTileLayer::get_editor_view_longitude() const
+    {
+        return editor_view_longitude_;
+    }
+
+    void GlobeTileLayer::set_editor_view_latitude( const double p_value )
+    {
+        editor_view_latitude_ = p_value;
+        reframe_editor_view();
+    }
+
+    double GlobeTileLayer::get_editor_view_latitude() const
+    {
+        return editor_view_latitude_;
+    }
+
+    void GlobeTileLayer::set_editor_view_distance( const double p_value )
+    {
+        editor_view_distance_ = p_value;
+        reframe_editor_view();
+    }
+
+    double GlobeTileLayer::get_editor_view_distance() const
+    {
+        return editor_view_distance_;
+    }
+
+    void GlobeTileLayer::reframe_editor_view()
+    {
+        needs_framing_ = true;
+        framing_frames_ = 0;
+
+        // Property setters run while the scene is still being deserialized, i.e. before the
+        // node is in the tree; to_global() there is an engine error and hands back an
+        // identity transform. Arming the request is enough - update_tiles() applies it on
+        // the first frame, and reframe_editor_view() called from a script applies it now.
+        if ( !is_inside_tree() )
+        {
+            return;
+        }
+
+        // Apply straight away so an Inspector tweak shows up immediately instead of on the
+        // next process frame. frame_ is normally refreshed inside update_tiles(); a setter
+        // can arrive before that has ever run.
+        resolve_frame();
+        center_cache_ = frame_.ellipsoid_center_local();
+        apply_editor_framing();
     }
 
     void GlobeTileLayer::set_show_tile_bounds( const bool p_value )
@@ -476,6 +589,134 @@ namespace tiles3d
         return viewport != nullptr ? viewport->get_camera_3d() : nullptr;
     }
 
+    // ---- editor viewport plumbing ----
+
+    godot::Camera3D *GlobeTileLayer::resolve_editor_camera() const
+    {
+#ifdef TILES3D_EDITOR_TARGET
+        Engine *engine = Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
+        {
+            return nullptr;
+        }
+        godot::EditorInterface *editor = godot::EditorInterface::get_singleton();
+        if ( editor == nullptr )
+        {
+            return nullptr;
+        }
+        godot::SubViewport *viewport = editor->get_editor_viewport_3d();
+        return viewport != nullptr ? viewport->get_camera_3d() : nullptr;
+#else
+        return nullptr;
+#endif
+    }
+
+    bool GlobeTileLayer::apply_editor_framing()
+    {
+        godot::Camera3D *editor_camera = resolve_editor_camera();
+        if ( editor_camera == nullptr )
+        {
+            return false;
+        }
+
+        const double distance = std::max( editor_view_distance_, 1.0 );
+        const math::Vec3 direction_local = frame_.local_direction(
+            math::geodeticToYUp( editor_view_longitude_ * kDegreesToRadians,
+                                 editor_view_latitude_ * kDegreesToRadians, 0.0 ) );
+        const math::Vec3 center_local = frame_.ellipsoid_center_local();
+        const Vector3 direction( static_cast<float>( direction_local.x ),
+                                 static_cast<float>( direction_local.y ),
+                                 static_cast<float>( direction_local.z ) );
+        const Vector3 center( static_cast<float>( center_local.x ),
+                              static_cast<float>( center_local.y ),
+                              static_cast<float>( center_local.z ) );
+        const Vector3 eye = center + direction.normalized() * static_cast<float>( distance );
+        const Vector3 forward = ( center - eye ).normalized();
+        Vector3 up( 0.0f, 1.0f, 0.0f );
+        if ( std::abs( forward.dot( up ) ) > 0.99f )
+        {
+            up = Vector3( 0.0f, 0.0f, 1.0f );
+        }
+        const Vector3 right = up.cross( forward ).normalized();
+        const Vector3 camera_up = forward.cross( right ).normalized();
+        // Godot cameras look down their local -Z.
+        //
+        // The pose above was built out of frame-local vectors (frame_.ellipsoid_center_local()
+        // and frame_.local_direction()), while the editor camera's global transform lives in
+        // the editor's own space. This layer sits inside the georeference, so its own global
+        // transform is exactly the mapping between the two - without it the Z-up -> Y-up flip
+        // on Georeference3D puts the camera at the wrong longitude and latitude.
+        editor_camera->set_global_transform(
+            get_global_transform() *
+            godot::Transform3D( godot::Basis( right, camera_up, -forward ), eye ) );
+        assert_editor_clip( editor_camera );
+        return true;
+    }
+
+    void GlobeTileLayer::assert_editor_clip( godot::Camera3D *p_camera )
+    {
+        if ( p_camera == nullptr || !manage_editor_clip_ || !is_inside_tree() )
+        {
+            return;
+        }
+        // Run-time cameras belong to the scene (GlobeCameraController); only the editor's
+        // free camera is ours to fix.
+        Engine *engine = Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
+        {
+            return;
+        }
+        const Vector3 center_world =
+            to_global( Vector3( center_cache_.x, center_cache_.y, center_cache_.z ) );
+        const double center_distance =
+            std::max( 1.0, static_cast<double>(
+                              ( center_world - p_camera->get_global_position() ).length() ) );
+
+        // Near grows with the distance so the depth ratio stays usable, and is capped so a
+        // camera pressed against the surface does not clip the ground it is standing on.
+        p_camera->set_near(
+            static_cast<float>( std::clamp( center_distance * 1e-4, 1.0, 1.0e6 ) ) );
+        // Far must clear the far side of the globe, which sits at (distance + radius), not
+        // just some multiple of the distance: below radius/3 the two differ and the floor
+        // takes over. Half a radius of margin beyond that covers the atmosphere shell. For
+        // every view from outside the planet the 4x term dominates, so the depth ratio is
+        // exactly what a plain multiple would give.
+        const double radius = math::kWgs84SemiMajorAxis;
+        p_camera->set_far( static_cast<float>(
+            std::max( center_distance * 4.0, center_distance + 1.5 * radius ) ) );
+    }
+
+    void GlobeTileLayer::disconnect_pre_draw()
+    {
+        if ( !pre_draw_connected_ )
+        {
+            return;
+        }
+        pre_draw_connected_ = false;
+
+        godot::RenderingServer *rs = godot::RenderingServer::get_singleton();
+        if ( rs == nullptr )
+        {
+            // Already tearing down; the server drops its own connections with it.
+            return;
+        }
+        const Callable callable( this, "_on_frame_pre_draw" );
+        if ( rs->is_connected( "frame_pre_draw", callable ) )
+        {
+            rs->disconnect( "frame_pre_draw", callable );
+        }
+    }
+
+    void GlobeTileLayer::_on_frame_pre_draw()
+    {
+        // Runs after every Node's _process and immediately before the frame is drawn, which
+        // is the only point that beats the editor: Node3DEditorViewport rewrites the viewport
+        // camera's near/far (0.1 / 4000) for as long as a navigation is in flight, and a
+        // _process-time write loses that race for the whole inertia tail - the globe blinks
+        // out in the middle of every wheel zoom.
+        assert_editor_clip( resolve_editor_camera() );
+    }
+
     void GlobeTileLayer::compute_frustum( godot::Camera3D *camera )
     {
         // Gribb-Hartmann plane extraction. Godot's Projection follows the OpenGL
@@ -548,56 +789,26 @@ namespace tiles3d
             return;
         }
 
+        // The frame has to be resolved *before* the framing block below, not after it:
+        // apply_editor_framing() builds its pose out of frame_ and the ellipsoid centre, and
+        // on the very first process frame an unresolved frame is all zeroes, which puts the
+        // camera at the anchor and makes the opening pose jump on the next frame.
+        resolve_frame();
+        center_cache_ = frame_.ellipsoid_center_local();
+
         if ( needs_framing_ )
         {
 #ifdef TILES3D_EDITOR_TARGET
-            // Fly the editor camera to the same opening pose the demo uses, so the globe is
-            // framed at a glance the moment the scene opens.
-            Engine *engine = Engine::get_singleton();
-            godot::EditorInterface *editor =
-                engine != nullptr && engine->is_editor_hint() ? godot::EditorInterface::get_singleton()
-                                                              : nullptr;
-            godot::SubViewport *viewport = editor != nullptr ? editor->get_editor_viewport_3d() : nullptr;
-            godot::Camera3D *editor_camera = viewport != nullptr ? viewport->get_camera_3d() : nullptr;
-            if ( editor_camera != nullptr )
+            // Fly the editor camera to the opening pose, so the globe is framed at a glance
+            // the moment the scene opens.
+            if ( apply_editor_framing() )
             {
-                const double longitude = 105.0 * kDegreesToRadians;
-                const double latitude = 25.0 * kDegreesToRadians;
-                const double distance = 1.6e7;
-                const math::Vec3 direction_local = frame_.local_direction(
-                    math::geodeticToYUp( longitude, latitude, 0.0 ) );
-                const math::Vec3 center_local = frame_.ellipsoid_center_local();
-                const Vector3 direction( static_cast<float>( direction_local.x ),
-                                         static_cast<float>( direction_local.y ),
-                                         static_cast<float>( direction_local.z ) );
-                const Vector3 center( static_cast<float>( center_local.x ),
-                                      static_cast<float>( center_local.y ),
-                                      static_cast<float>( center_local.z ) );
-                const Vector3 eye = center + direction.normalized() * static_cast<float>( distance );
-                const Vector3 forward = ( center - eye ).normalized();
-                Vector3 up( 0.0f, 1.0f, 0.0f );
-                if ( std::abs( forward.dot( up ) ) > 0.99f )
-                {
-                    up = Vector3( 0.0f, 0.0f, 1.0f );
-                }
-                const Vector3 right = up.cross( forward ).normalized();
-                const Vector3 camera_up = forward.cross( right ).normalized();
-                // Godot cameras look down their local -Z.
-                editor_camera->set_global_transform(
-                    godot::Transform3D( godot::Basis( right, camera_up, -forward ), eye ) );
-                // The pose alone is not enough. The editor viewport camera keeps its default
-                // clip planes - tens of metres - so a planet 6371 km across gets sliced away
-                // no matter where it is pointed. Scale the planes with the framing distance:
-                // near stays far enough out to keep the depth ratio usable, far comfortably
-                // clears the far side of the globe.
-                editor_camera->set_near( static_cast<float>( distance * 1e-4 ) );
-                editor_camera->set_far( static_cast<float>( distance * 4.0 ) );
                 // Only settled once the editor camera actually exists; otherwise the very
                 // first frames of an editor session swallow the request and the globe stays
                 // off-screen at (0, 0, 10) for the rest of the session. Then keep re-applying
-                // until a frame really draws something - the editor resets near/far every
-                // frame - and never longer than the cap, so a camera that never resolves
-                // does not leave the user locked out of their own viewport.
+                // until a frame really draws something, and never longer than the cap, so a
+                // camera that never resolves does not leave the user locked out of their
+                // own viewport.
                 ++framing_frames_;
                 const bool hold_until_loaded =
                     !tiles_rendered_once_ && framing_frames_ < kFramingFrameCap;
@@ -608,9 +819,6 @@ namespace tiles3d
             }
 #endif
         }
-
-        resolve_frame();
-        center_cache_ = frame_.ellipsoid_center_local();
 
         // Camera in mesh space, and in Y-up ECEF for the horizon culling test.
         const Vector3 world_camera = camera->get_global_position();
@@ -635,27 +843,12 @@ namespace tiles3d
             }
         }
 #endif
-#ifdef TILES3D_EDITOR_TARGET
-        // The Godot editor rewrites the 3D viewport camera's clip planes every frame, so one
-        // assignment on the first frames is not enough - the planet is back to being clipped
-        // away before the imagery arrives. The layers know the world scale, so re-assert a
-        // usable near/far ratio around wherever the camera actually is. At the default
-        // framing distance that is near 1600 m / far 64 Mm; zoomed down to the surface it
-        // tightens on its own. Only the editor camera is touched; the run-time camera stays
-        // the scene's own, which GlobeCameraController already configures.
-        Engine *clip_engine = Engine::get_singleton();
-        if ( clip_engine != nullptr && clip_engine->is_editor_hint() && manage_editor_clip_ )
-        {
-            const Vector3 center_world = to_global( Vector3( center_cache_.x, center_cache_.y,
-                                                             center_cache_.z ) );
-            const double center_distance =
-                std::max( 1.0, static_cast<double>(
-                                   ( center_world - camera->get_global_position() ).length() ) );
-            camera->set_near(
-                static_cast<float>( std::clamp( center_distance * 1e-4, 1.0, 1.0e6 ) ) );
-            camera->set_far( static_cast<float>( center_distance * 4.0 ) );
-        }
-#endif
+        // The editor viewport camera keeps its own 0.1 / 4000 m defaults, which cannot even
+        // reach the Earth's centre; the run-time camera stays the scene's own, which
+        // GlobeCameraController already configures. assert_editor_clip() is a no-op for the
+        // latter, and _on_frame_pre_draw() re-asserts it again the instant before the frame
+        // is drawn, which is what beats the editor's own rewrite during navigation.
+        assert_editor_clip( camera );
 
         fov_radians_ = static_cast<double>( camera->get_fov() ) * kDegreesToRadians;
 

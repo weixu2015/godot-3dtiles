@@ -65,6 +65,57 @@ namespace tiles3d::math
                      std::sin( latitude ) );
     }
 
+    Vec3 cartesianToWgs84( const Vec3 &ecef_z_up )
+    {
+        const double x = ecef_z_up.x;
+        const double y = ecef_z_up.y;
+        const double z = ecef_z_up.z;
+
+        const double semiMinor = kWgs84SemiMinorAxis;
+        const double firstEccentricitySquared = kWgs84EccentricitySquared;
+        const double secondEccentricitySquared =
+            ( kWgs84SemiMajorAxis * kWgs84SemiMajorAxis - semiMinor * semiMinor ) /
+            ( semiMinor * semiMinor );
+
+        const double p = std::sqrt( x * x + y * y );
+        const double longitude = std::atan2( y, x );
+
+        // Bowring: start from the parametric (geocentric-like) angle, then refine. At the
+        // poles p is zero and the formula divides by it, so short-circuit to the exact answer.
+        if ( p < 1e-9 )
+        {
+            return Vec3( longitude, z >= 0.0 ? 0.5 * kPi : -0.5 * kPi,
+                         std::abs( z ) - semiMinor );
+        }
+
+        const double theta = std::atan2( z * kWgs84SemiMajorAxis, p * semiMinor );
+        const double sinTheta = std::sin( theta );
+        const double cosTheta = std::cos( theta );
+
+        double latitude = std::atan2(
+            z + secondEccentricitySquared * semiMinor * sinTheta * sinTheta * sinTheta,
+            p - firstEccentricitySquared * kWgs84SemiMajorAxis * cosTheta * cosTheta *
+                    cosTheta );
+
+        for ( int i = 0; i < 2; ++i )
+        {
+            const double sinLat = std::sin( latitude );
+            const double primeVertical = kWgs84SemiMajorAxis /
+                                         std::sqrt( 1.0 - firstEccentricitySquared *
+                                                             sinLat * sinLat );
+            latitude = std::atan2( z + firstEccentricitySquared * primeVertical * sinLat,
+                                   p );
+        }
+
+        const double sinLat = std::sin( latitude );
+        const double primeVertical =
+            kWgs84SemiMajorAxis /
+            std::sqrt( 1.0 - firstEccentricitySquared * sinLat * sinLat );
+        const double height = p / std::cos( latitude ) - primeVertical;
+
+        return Vec3( longitude, latitude, height );
+    }
+
     Vec3 normalizeSafe( const Vec3 &v )
     {
         const double length = glm::length( v );

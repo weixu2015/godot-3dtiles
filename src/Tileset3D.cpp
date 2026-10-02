@@ -387,6 +387,14 @@ namespace tiles3d
         ClassDB::bind_method( D_METHOD( "get_root_geometric_error" ),
                               &Tileset3D::get_root_geometric_error );
         ClassDB::bind_method( D_METHOD( "get_last_error" ), &Tileset3D::get_last_error );
+
+        ClassDB::bind_method( D_METHOD( "get_dataset_longitude" ),
+                              &Tileset3D::get_dataset_longitude );
+        ClassDB::bind_method( D_METHOD( "get_dataset_latitude" ), &Tileset3D::get_dataset_latitude );
+        ClassDB::bind_method( D_METHOD( "get_dataset_height" ), &Tileset3D::get_dataset_height );
+        ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
+        ClassDB::bind_method( D_METHOD( "get_anchor_separation" ),
+                              &Tileset3D::get_anchor_separation );
         ClassDB::bind_method( D_METHOD( "is_placed_by_georeference" ),
                               &Tileset3D::is_placed_by_georeference );
         ClassDB::bind_method( D_METHOD( "get_loaded_tile_count" ),
@@ -903,7 +911,69 @@ namespace tiles3d
             path, asset_version, static_cast<int>( tile_count ), maximum_depth, root_geometric_error,
             upAxisName, placed_by_georeference ? "yes" : "no (origin-centred fallback)" ) );
 
+        report_georeference();
+
         emit_signal( "tileset_loaded" );
+    }
+
+    void Tileset3D::report_georeference()
+    {
+        if ( root == nullptr || !root->boundingVolume.has_value() )
+        {
+            return;
+        }
+
+        // Where does this dataset actually say it is? The root tile's own transform maps
+        // tile-local coordinates to *ECEF* - the top-level parent frame of a 3D Tiles tree is
+        // the global one, well before any georeference is involved. worldMatrix is not usable
+        // here: the traversal fills it in, and load() finishes long before that. Composing
+        // the answer from ECEF also means it is the one number that can disagree with the
+        // georeference, which is exactly the point of the check.
+        const math::Vec3 local_center = math::boundingVolumeCenter( *root->boundingVolume );
+        const math::Vec3 world_center = math::transformPoint( root->transform, local_center );
+        const math::Vec3 geodetic = math::cartesianToWgs84( world_center );
+        const double longitude = geodetic.x * 180.0 / math::kPi;
+        const double latitude = geodetic.y * 180.0 / math::kPi;
+
+        dataset_longitude_ = longitude;
+        dataset_latitude_ = latitude;
+        dataset_height_ = geodetic.z;
+        anchor_separation_ = -1.0;
+
+        UtilityFunctions::print( godot::vformat(
+            "[Tileset3D] dataset centre: lon=%.5f lat=%.5f h=%.1f m (from its own transform)",
+            longitude, latitude, geodetic.z ) );
+
+        const Georeference3D *reference = find_georeference();
+        if ( reference == nullptr )
+        {
+            return;
+        }
+
+        const math::Vec3 anchor = reference->origin_ecef();
+        const double separation = glm::length( world_center - anchor );
+        anchor_separation_ = separation;
+        const double radius = root->boundingVolume.has_value()
+                                  ? math::boundingVolumeRadius( *root->boundingVolume )
+                                  : 0.0;
+
+        UtilityFunctions::print( godot::vformat(
+            "[Tileset3D] georeference anchor is %.1f km from the dataset centre (radius %.0f m)",
+            separation / 1000.0, radius ) );
+
+        // A dataset that is georeferenced somewhere else still loads, still reports every
+        // tile as loaded, and still renders nothing - because it is simply off-screen. The
+        // failure looks exactly like a rendering bug, so say it out loud instead.
+        const double tolerance = std::max( 3.0 * radius, 10000.0 );
+        if ( separation > tolerance )
+        {
+            UtilityFunctions::printerr( godot::vformat(
+                "[Tileset3D] WARNING: '%s' is %.1f km from the Georeference3D anchor "
+                "(lon=%.5f lat=%.5f). Nothing will be visible at the anchor. Either the "
+                "dataset's tileset.json declares the wrong transform, or the anchor belongs "
+                "somewhere else - the distance is far beyond the dataset's own %.0f m radius.",
+                url, separation / 1000.0, longitude, latitude, radius ) );
+        }
     }
 
     void Tileset3D::reload()
@@ -1116,6 +1186,31 @@ namespace tiles3d
     double Tileset3D::get_root_geometric_error() const
     {
         return root_geometric_error;
+    }
+
+    double Tileset3D::get_dataset_longitude() const
+    {
+        return dataset_longitude_;
+    }
+
+    double Tileset3D::get_dataset_latitude() const
+    {
+        return dataset_latitude_;
+    }
+
+    double Tileset3D::get_dataset_height() const
+    {
+        return dataset_height_;
+    }
+
+    double Tileset3D::get_dataset_radius() const
+    {
+        return dataset_radius;
+    }
+
+    double Tileset3D::get_anchor_separation() const
+    {
+        return anchor_separation_;
     }
 
     String Tileset3D::get_last_error() const

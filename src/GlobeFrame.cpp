@@ -3,6 +3,7 @@
 #include "GlobeFrame.h"
 
 #include "Georeference3D.h"
+#include "Globe3D.h"
 
 #include "core/math/GeoMath.h"
 
@@ -61,6 +62,39 @@ namespace tiles3d
         frame.ecef_to_local_ = z_up_to_y_up();
         frame.local_to_ecef_ = math::invert( frame.ecef_to_local_ );
         return frame;
+    }
+
+    GlobeFrame GlobeFrame::from_carrier( const godot::Node *carrier )
+    {
+        if ( carrier == nullptr )
+        {
+            // Same fallback a node with no georeference ancestor gets: local space is
+            // Y-up ECEF with the flip baked in.
+            return GlobeFrame::resolve( nullptr );
+        }
+
+        if ( const Georeference3D *reference =
+                 godot::Object::cast_to<Georeference3D>( carrier ) )
+        {
+            GlobeFrame frame;
+            frame.ecef_to_local_ = reference->ecef_to_local();
+            frame.local_to_ecef_ = reference->local_to_ecef();
+            return frame;
+        }
+
+        if ( const Globe3D *globe = godot::Object::cast_to<Globe3D>( carrier ) )
+        {
+            // The globe already resolved a frame (possibly the fallback above); sharing it
+            // verbatim is what keeps a camera aimed at the same ellipsoid that was drawn.
+            return globe->frame();
+        }
+
+        if ( const godot::Node3D *node = godot::Object::cast_to<godot::Node3D>( carrier ) )
+        {
+            return GlobeFrame::resolve( node );
+        }
+
+        return GlobeFrame::resolve( nullptr );
     }
 
     math::Vec3 GlobeFrame::to_local( const math::Vec3 &ecef_z_up ) const

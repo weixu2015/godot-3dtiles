@@ -277,6 +277,20 @@ Godot 是 Y-up，参考实现是 **Y 为极轴** 的 ECEF。两者**恰好一致
   `editor / needs_framing / campos / camcenter / near / far / rendered`，
   排查"场景看着是空的"时先开它，demo 场景默认关闭。
 
+**编辑器相机的"小世界"限制（实测，不是猜测）**
+
+| 现象 | 实测数据 | 根因 | 处理 |
+|---|---|---|---|
+| Viewport Settings 里 View Z-Far 最多填 1000000 | 地球半径 6375000 m，比 UI 上限还大 | 那是**编辑器 UI 的上限**，不是引擎上限：扩展写 far=6.4e7 时能稳定生效（90k 帧遥测不掉） | `manage_editor_clip`（默认开）每帧重写，那个对话框对 globe 场景已无意义 |
+| 滚轮缩放"地球大小不变" | 从 16000 km 机位发 5 个 wheel 事件，相机只移动 **1 m**（0.2 m/格） | 编辑器自由相机的**导航状态是自己的私有量**（focus/distance），滚轮步长由它算，跟我们写进去的 `set_global_transform` 无关；它学到的是"小世界"尺度 | 不用滚轮：改用 `editor_view_longitude / _latitude / _distance` 三个属性（或 `reframe_editor_view()`）确定性取景，改一下就是一次"缩放" |
+| 滚轮"缩放过程中地球隐藏了" | 导航期间编辑器把相机 near/far 写成 **0.1 / 4000**，持续整个惯性拖尾（≈20+ 帧），far=4000 直接切掉 6.4e6 m 外的星球 | 编辑器在导航帧把裁剪面写回自己的预设，且写在我们的 `_process` 之后 | 改到 `RenderingServer.frame_pre_draw` 里再断言一次（该钩子在所有 Node 的 `_process` 之后、绘制之前），修复后滚轮全程维持 near=1600 / far=6.4e7 |
+| 想用 camera override 彻底接管编辑器视口 | `ClassDB.class_has_method("Viewport","enable_camera_3d_override")` = **false** | 该 API 没进 `_bind_methods`，脚本层（含 `Object::call`）完全不可达 | 放弃这条路；编辑器的定位就是"检查摆放"，要交互导航就跑场景用 `GlobeCameraController` |
+| far 公式 | 相机在椭球内时 `4d` 会切掉对侧地表 | 需要 `far ≥ d + R` 而不是 `k·d` | `far = max(4d, d + 1.5R)`，对任何球外机位 4d 项占优、深度比不变 |
+
+> 结论：**编辑器里能"看"，不能"飞"**。摆放检查用属性取景，交互浏览用运行窗口。
+> 顺便记一笔：编辑器恢复的是上次的活动标签页（`.godot/editor/editor_layout.cfg` 的
+> `current_scene`），只传场景路径不改那个文件的话，截图可能拍到别的场景。
+
 ### P2 — 3D Tiles 落位（核心价值）
 
 | 任务 | 文件 | 验收 |
@@ -437,3 +451,78 @@ P3 的相机控制器应该先做（P1 的验收需要"以指定位姿观察地�
 | 5 | 节点架构 | **方案 A**：`Globe3D` 与 `Tileset3D` 同级，都向上解析 `Georeference3D` |
 | 6 | `GlobeSubScene` | **保留在计划中**（P5），本轮不实现 |
 
+### 地理参考自检 + Home 按钮 + 一个待修的坐标系 bug（2026-10-02 第二轮）
+
+**数据集"已加载但看不见"的定论**（`taiwan` 数据集）：
+`root.transform` 是一个 ENU 帧，原点在 **lon 120.00000 / lat 30.00000**（整数，像转换器写死的占位值），
+包围盒中心经它变换后落在 **lon 120.40568 / lat 31.07878 / h 1712.1 m**（江苏一带），
+距场景锚点（台湾 120.97 / 23.5）**841 km**。所以不是渲染问题，是 geotwin 导出的 georeference 不对。
+
+- 新增 `Tileset3D::report_georeference()`：加载后打印数据集自报经纬度与锚点距离，
+  超过 `max(3 * radius, 10 km)` 就告警 `Nothing will be visible at the anchor`。
+  这类故障此前与渲染 bug 完全不可区分：每个瓦片都报 loaded，屏幕一片空。
+- 新增 `GeoMath::cartesianToWgs84`（Bowring，含极点短路），单测往返 6 组采样。
+  用 Cesium 官方 `1.0/Photogrammetry` 数据集交叉验证：它自报 lon -75.59671 / lat 40.03880（费城）。
+- 新增 5 个 getter：`get_dataset_longitude/latitude/height/radius/anchor_separation`。
+
+**Home 按钮**（`globe.tscn` 的 HUD）：`globe.gd::home()` 按**数据集自己的声明位置**做 flyTo，
+并实时显示 dataset 经纬度/半径/距锚点距离。配套 `GlobeCameraController::fly_to(lon, lat, dist, sec)`：
+
+- 方向用 Rodrigues 球面插值，**不能**用 `Vector3.slerp`——它以 `cross(from,to)` 定轴，
+  近平行或对跖时退化。台湾→费城相距 160°，实测会乱跳。
+- 距离走 log 空间缓动；`is_flying()` 可查；真实输入取消飞行。
+- **取消条件必须忽略零位移的 hover motion**：窗口获得焦点会发一个 delta = 0 的 motion，
+  按"任意输入即取消"会让长距离飞行中途停住。中国→费城的大圆航线恰好经过西伯利亚，
+  于是表现为"飞到西伯利亚去了"（实为飞了 30%~50% 就停）。已修并实测。
+- 距离下限取**目标点本地地表半径 + 1 m**，不是 `min_distance()`（极半径 x 1.01 = 全球固定
+  42 km 高度，会让 389 m 的数据集只剩一个点）。
+
+**已修：相机在带 Georeference3D 的场景里落到错误经纬度**（2026-10-02 第三轮）
+
+三个独立的 bug 叠在一起，症状都是"Home 按钮飞不到数据集"：
+
+1. **`frame()` 解析到的帧不是 pivot/转换用的那一帧**（主因，`GlobeFrame.cpp` / `GlobeCameraController.cpp`）
+   - `GlobeCameraController` 是 `Georeference3D` 的**同级兄弟**，而 `GlobeFrame::resolve()` 只走
+     祖先链 → 找不到 → 回退成"局部空间 = Y-up ECEF（只带翻转，无平移）"。
+     但 pivot 与 `frame_point_to_parent()` 走的是**锚点 ENU 帧**。两帧之间差一个旋转**和一个
+     6370 km 平移**，所以"距离对、方向错"：实测请求费城（−75.5967, 40.0388）落到
+     （144.99, 62.18）即西伯利亚，误差 8083 km。
+   - 为什么距离类检查全都通过：旋转保长度，且 `resolve_ellipsoid_center()` 当时仍从
+     Georeference3D 取 pivot，只有**方向**用了回退帧。
+   - 修法：`GlobeFrame::from_carrier(carrier)` 从"真正承载帧的节点"构建帧（Georeference3D → 其
+     ENU 矩阵；Globe3D → 它自己已解析的帧；null → 回退帧），`frame()` 改用它，
+     与 `resolve_frame_node()` 同源。同时新增 `frame_point_from_parent()` 作为
+     `frame_point_to_parent()` 的逆，供 `camera_height_above_ellipsoid()` /
+     `enforce_camera_above_ellipsoid()` 把父空间坐标喂回帧矩阵（原先直接把父空间当帧局部，
+     在 Georeference3D 带翻转 transform 时方向会差 90°）。`ellipsoid_offset()` 收敛了这两处重复计算。
+   - 顺带删掉未声明就调用的 `frame_point_from_ecef()`（WIP 里编不过）。
+
+2. **`Georeference3D` 的 transform 没写在 `globe.tscn` 里** → 场景世界是 Z-up ENU，
+   与 `node_3d.tscn`（带 `Transform3D(1,0,0, 0,0,1, 0,-1,0)`）不一致，
+   `look_at` 的 up、轨道仰角钳制都按 Y-up 假设。已补上同一 transform。
+
+3. **`Globe3D::local_to_geodetic()` 返回的是地心纬度**（`atan2(z,p)` + `|v| − A` 当高度），
+   不是文档承诺的 geodetic，也不是 `geodetic_to_local()` 的逆：纬度 40° 差 0.19°（约 21 km），
+   高度差数百米。改为走内核的 `cartesianToWgs84()`（Bowring）。任何"把位置和数据集自报经纬度
+   对比"的检查都会被它误导成落位 bug。
+
+4. **Home 取景距离偏 8 km**（`globe.gd`）：`EARTH_A + height + 4r` 用的是赤道半径，
+   而纬度 40° 处椭球面离地心比赤道**近 8 km**，于是相机停在数据集上方 ~10 km，
+   数据集只剩十几个像素。改为经 Globe3D 量"地心 → 目标点"的真实距离。
+
+**验收**：新增 `demo/globe_fly_audit.tscn`（无头可跑，真机渲染时另存截图）：
+
+```
+godot --headless --path demo globe_fly_audit.tscn
+godot --path demo --rendering-driver opengl3 globe_fly_audit.tscn   # 另存 globe_fly_audit.png
+```
+
+7 项断言：相机经纬度 == 数据集自报经纬度、相机高度 == 请求取景高度、
+瓦片内容落位在数据集经纬度上、内容在相机前方且落在画面中心。
+**负向对照**：把 `frame()` 改回 `GlobeFrame::resolve(this)` 重编，审计立刻报
+`camera longitude -63.97 / latitude 59.60`（2 项 FAIL），证明该审计确实能捕获此 bug；
+修复版 ALL PASS，内核单测 84 例中 78 过 / 6 失败（与基线一致，均为既有 gltf_reader 用例）。
+
+**注**：`globe.tscn` 的锚点与数据集已对齐（Philadelphia −75.596707 / 40.038796）；
+换回 taiwan 数据集时锚点要同时改回 120.97 / 23.5，否则数据集会落在离锚点 12000 km 处，
+float32 量化到 ~1 m。
