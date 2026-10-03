@@ -3,6 +3,7 @@
 #include "GlobeTileLayer.h"
 
 #include "Georeference3D.h"
+#include "GlobeAtmosphereShading.h"
 #include "GodotMathConvert.h"
 
 #include "core/math/EllipsoidalOccluder.h"
@@ -19,6 +20,7 @@
 #include "godot_cpp/classes/object.hpp"
 #include "godot_cpp/classes/project_settings.hpp"
 #include "godot_cpp/classes/rendering_server.hpp"
+#include "godot_cpp/classes/shader_material.hpp"
 #include "godot_cpp/classes/standard_material3d.hpp"
 #include "godot_cpp/classes/sub_viewport.hpp"
 #include "godot_cpp/classes/texture2d.hpp"
@@ -63,6 +65,7 @@ namespace tiles3d
     using godot::Projection;
     using godot::PropertyInfo;
     using godot::Ref;
+    using godot::ShaderMaterial;
     using godot::StandardMaterial3D;
     using godot::String;
     using godot::Time;
@@ -557,6 +560,13 @@ namespace tiles3d
         // is an ancestor, otherwise Y-up ECEF with the flip baked in. Using it verbatim is
         // what makes imagery land on the globe and beside the tilesets.
         frame_ = GlobeFrame::resolve( this );
+
+        // The tile material needs the frame's local space -> Y-up ECEF matrix, because the
+        // scattering integral measures from the Earth's centre and the tile vertices are
+        // authored in the georeference's ENU frame. Published here as well as from Globe3D so
+        // a scene with a bare GlobeTileLayer and no Globe3D still shades correctly; both nodes
+        // resolve the same frame, so the two writes agree.
+        GlobeAtmosphereShading::publish_frame( frame_ );
     }
 
     math::Vec3 GlobeTileLayer::mesh_point( const math::Vec3 &ecef_z_up ) const
@@ -1364,14 +1374,26 @@ namespace tiles3d
         surface_arrays[godot::Mesh::ARRAY_INDEX] = indices;
         mesh->add_surface_from_arrays( godot::Mesh::PRIMITIVE_TRIANGLES, surface_arrays );
 
-        Ref<StandardMaterial3D> material;
+        Ref<ShaderMaterial> material;
         material.instantiate();
-        material->set_shading_mode( StandardMaterial3D::SHADING_MODE_UNSHADED );
-        // Double-sided on purpose: the skirt wall must seal LOD cracks seen from both
-        // sides, exactly like the reference's DoubleSide tile material. Revisit for
-        // performance only if tile counts ever demand it.
-        material->set_cull_mode( StandardMaterial3D::CULL_DISABLED );
-        material->set_albedo( kPlaceholderColor );
+        // The ground-atmosphere pass lives here, not on Globe3D's own ellipsoid.
+        //
+        // The reference injects the same integral into the *tile* material
+        // (applyDayNightShading, atmosphere.ts:390) and Cesium computes it per tile fragment
+        // (GlobeFS.glsl:516), because the tile material is the thing that actually draws the
+        // planet. An earlier version of this port put the pass on Globe3D::Surface instead -
+        // a mesh these tiles cover completely, so it contributed no pixels to any frame while
+        // still reporting a live material and correct uniforms.
+        //
+        // Because the shader replaces StandardMaterial3D wholesale it has to reproduce the
+        // feature set that was there before, which is exactly: UNSHADED, CULL_DISABLED (the
+        // skirts must seal LOD cracks seen from both sides, like the reference's DoubleSide
+        // tile material), the placeholder albedo, and a mercator UV scale/offset.
+        material->set_shader( GlobeAtmosphereShading::ground_shader() );
+        material->set_shader_parameter( "u_has_texture", false );
+        material->set_shader_parameter( "u_base_color",
+                                        Vector3( kPlaceholderColor.r, kPlaceholderColor.g,
+                                                 kPlaceholderColor.b ) );
 
         tile->base_uvs = uvs;
         tile->appearance_source = nullptr;
@@ -1408,7 +1430,7 @@ namespace tiles3d
             return;
         }
         GlobeTile *source = find_appearance_source( tile );
-        Ref<StandardMaterial3D> material = tile->mesh->get_material_override();
+        Ref<ShaderMaterial> material = tile->mesh->get_material_override();
         if ( material.is_null() )
         {
             return;
@@ -1418,11 +1440,13 @@ namespace tiles3d
         {
             if ( tile->appearance_source != nullptr || tile->texture_version != texture_version_ )
             {
-                material->set_texture( StandardMaterial3D::TEXTURE_ALBEDO,
-                                       Ref<godot::Texture2D>() );
-                material->set_albedo( kPlaceholderColor );
-                material->set_uv1_scale( Vector3( 1.0f, 1.0f, 1.0f ) );
-                material->set_uv1_offset( Vector3( 0.0f, 0.0f, 0.0f ) );
+                material->set_shader_parameter( "u_has_texture", false );
+                material->set_shader_parameter( "u_albedo_texture", Ref<godot::Texture2D>() );
+                material->set_shader_parameter( "u_base_color",
+                                                Vector3( kPlaceholderColor.r, kPlaceholderColor.g,
+                                                         kPlaceholderColor.b ) );
+                material->set_shader_parameter( "u_uv_scale", Vector2( 1.0f, 1.0f ) );
+                material->set_shader_parameter( "u_uv_offset", Vector2( 0.0f, 0.0f ) );
                 tile->appearance_source = nullptr;
                 tile->texture_version = texture_version_;
             }
@@ -1446,12 +1470,14 @@ namespace tiles3d
         const double dv = ( math::mercatorY( tr.north ) - math::mercatorY( tr.south ) ) / ( smn - sms );
         const double v0 = ( smn - math::mercatorY( tr.north ) ) / ( smn - sms );
 
-        material->set_texture( StandardMaterial3D::TEXTURE_ALBEDO, source->texture );
-        material->set_albedo( Color( 1.0f, 1.0f, 1.0f, 1.0f ) );
-        material->set_uv1_scale(
-            Vector3( static_cast<float>( du ), static_cast<float>( dv ), 1.0f ) );
-        material->set_uv1_offset(
-            Vector3( static_cast<float>( u0 ), static_cast<float>( v0 ), 0.0f ) );
+        material->set_shader_parameter( "u_has_texture", true );
+        material->set_shader_parameter( "u_albedo_texture", source->texture );
+        material->set_shader_parameter( "u_uv_scale",
+                                        Vector2( static_cast<float>( du ),
+                                                 static_cast<float>( dv ) ) );
+        material->set_shader_parameter( "u_uv_offset",
+                                        Vector2( static_cast<float>( u0 ),
+                                                 static_cast<float>( v0 ) ) );
 
         tile->appearance_source = source;
         tile->texture_version = texture_version_;

@@ -55,10 +55,15 @@ radial_segments = 128
 rings = 64
 show_graticule = false
 show_atmosphere = true
-atmosphere_scale = 1.06
-atmosphere_color = Color(0.3, 0.55, 1, 1)
-atmosphere_intensity = 2.4
-atmosphere_falloff = 8.0
+; 1.025 is the reference value, not a taste setting: the raymarch always integrates
+; ATMOSPHERE_THICKNESS (111 km) from the surface, and the shell only has to be large enough
+; to contain that volume. Anything above 1.025 moves a *surface* that is no longer visible.
+atmosphere_scale = 1.025
+atmosphere_color = Color(1, 1, 1, 1)
+atmosphere_intensity = 45.0
+atmosphere_sunset_tint = 0.65
+show_sun = true
+sun_angular_scale = 1.0
 
 [node name="GlobeTileLayer" type="GlobeTileLayer" parent="Georeference3D"]
 print_telemetry = true

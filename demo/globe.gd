@@ -116,6 +116,14 @@ func _update_status(prefix: String = "") -> void:
 			text += "\nWARNING: not visible from the anchor"
 	if prefix != "":
 		text = prefix + "\n" + text
+
+	# The sub-solar point is the one number that explains the terminator: if the lit side is
+	# not where these coordinates say it should be, the frame conversion is wrong, not the
+	# lighting.
+	var globe := get_node_or_null("Georeference3D/Globe3D")
+	if globe != null:
+		var sub: Vector2 = globe.call("get_sub_solar_point")
+		text += "\nsun  lon %.2f  lat %.2f" % [sub.x, sub.y]
 	_status.text = text
 
 func _process(_delta: float) -> void:
@@ -127,35 +135,38 @@ func _process(_delta: float) -> void:
 		_update_status()
 	_was_flying = flying
 
-# A DirectionalLight3D only cares about its orientation, so the scene file's transform says
-# nothing about which side is lit. Point the sun at the hemisphere the camera is actually
-# looking at, otherwise the opening view can land entirely on the night side. The offset
-# keeps a terminator in frame instead of a flat, fully lit disc.
+# Points the scene's DirectionalLight3D at the same place the globe's atmosphere is lit
+# from.
+#
+# This used to derive the sun from the camera ("keep the opening view out of the dark"),
+# which is why the screenshot showed a bright globe and a sun sprite in unrelated places:
+# the atmosphere integrates its own terminator from the globe's sub-solar direction, and any
+# light that disagrees with it lights the tiles from the wrong side.
+#
+# Now the globe owns the sun (Globe3D::get_sun_direction / get_sun_position) and this only
+# relays it, so the light, the atmosphere's scattering and the sun billboard are guaranteed
+# to agree. The DirectionalLight3D is a *renderer* of that direction for the tile content;
+# if the scene has no Sun node the globe still lights itself correctly.
 func _aim_sun() -> void:
 	var sun: DirectionalLight3D = get_node_or_null("Sun")
 	if sun == null:
 		return
+	var globe: Node3D = get_node_or_null("Georeference3D/Globe3D")
+	if globe == null:
+		return
 
-	# Direction from the *ellipsoid centre* to the camera. Deliberately not
-	# global_position.normalized(): that is only the same thing while the centre happens to
-	# sit at the world origin, and it is off by up to 90 degrees once a flight moves the
-	# camera - which puts the whole view on the night side and looks like nothing rendered.
-	# resolve_ellipsoid_center() is in the camera's parent space, so it goes through the
-	# parent to reach world space.
-	var pivot: Vector3 = _camera.call("resolve_ellipsoid_center")
-	var parent := _camera.get_parent() as Node3D
-	var world_pivot: Vector3 = parent.to_global(pivot) if parent != null else pivot
-	var to_cam := (_camera.global_position - world_pivot).normalized()
+	# Position matters only for the light's own debug gizmo - a DirectionalLight3D shades by
+	# orientation alone. orienting it via look_at() from the sun's position towards the Earth's
+	# centre is what makes its -Z point *from* the sun *at* the planet.
+	var centre: Vector3 = globe.call("ecef_to_local", Vector3.ZERO)
+	var world_centre: Vector3 = globe.to_global(centre)
+	var sun_position: Vector3 = globe.to_global(globe.call("get_sun_position") as Vector3)
 
 	var up := Vector3(0, 1, 0)
-	if absf(to_cam.dot(up)) > 0.99:
+	if absf((sun_position - world_centre).normalized().dot(up)) > 0.99:
 		up = Vector3(0, 0, 1)
-	var side := to_cam.cross(up).normalized()
-	var sun_dir := (to_cam + side * 0.6 + up * 0.4).normalized()
-	sun.global_position = world_pivot + sun_dir * 80000000.0
-	# DirectionalLight3D travels along its -Z, so looking at the globe centre makes it shine
-	# from wherever the light was placed.
-	sun.look_at(world_pivot, up)
+	sun.global_position = sun_position
+	sun.look_at(world_centre, up)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if _camera == null:
@@ -174,11 +185,39 @@ func _unhandled_input(event: InputEvent) -> void:
 		KEY_4:
 			_camera.orbit_to(105.0, 25.0, 6800000.0)    # skimming the surface
 		KEY_A:
-			_toggle("Globe3D", "show_atmosphere")
+			_toggle("Georeference3D/Globe3D", "show_atmosphere")
 		KEY_G:
-			_toggle("Globe3D", "show_graticule")
+			_toggle("Georeference3D/Globe3D", "show_graticule")
+		KEY_S:
+			_toggle("Georeference3D/Globe3D", "show_sun")
+		KEY_P:
+			# Toggles the pure Rayleigh integral, with no Mie forward lobe and no sunset tint.
+			# The atmosphere has several contributions and "it looks wrong" is impossible to
+			# attribute without being able to peel one off.
+			_toggle("Georeference3D/Globe3D", "atmosphere_debug_pure")
+		KEY_T:
+			# Steps the sunset tint, so the terminator can be dialled between physically
+			# neutral (0.0) and the demo default (0.65).
+			_cycle_sunset_tint()
 
 func _toggle(node_path: String, property: String) -> void:
 	var node := get_node_or_null(node_path)
 	if node != null:
 		node.set(property, not node.get(property))
+		_update_status()
+
+# Cycles the sunset tint through a few useful values, ending back at the demo default, and
+# prints the sub-solar point so the terminator can be compared against a known instant.
+func _cycle_sunset_tint() -> void:
+	var globe := get_node_or_null("Georeference3D/Globe3D")
+	if globe == null:
+		return
+	var steps := [0.0, 0.35, 0.65, 1.0]
+	var current: float = globe.get("atmosphere_sunset_tint")
+	var next: float = steps[0]
+	for i in steps.size():
+		if is_equal_approx(current, steps[i]):
+			next = steps[(i + 1) % steps.size()]
+			break
+	globe.set("atmosphere_sunset_tint", next)
+	_update_status("atmosphere_sunset_tint = %.2f" % next)
