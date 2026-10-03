@@ -1276,21 +1276,35 @@ namespace tiles3d
         // the sun visibly slide. Pinning it to the camera along the sub-solar direction gives
         // zero parallax and a constant angular size, which is what the reference does too.
         //
+        // The pin distance is clamped inside the camera's far plane: kSunSpriteDistance
+        // (4e8 m) exceeds the demo's far = 2e8, and a sprite beyond the far plane is clipped
+        // into invisibility - the demo ran for its whole life with no sun billboard at all,
+        // and the fuzzy blob people saw in its place was the ProceduralSkyMaterial's own
+        // procedural glare for the scene's DirectionalLight3D. Half the far plane keeps a
+        // safety margin; the quad size below uses the same distance, so the *angular* size
+        // is unchanged by the clamp.
+        //
         // The sun is a child of this node, but its transform is set in *global* space because
         // its position is defined relative to the camera. set_global_transform() handles the
         // conversion, and the basis is taken from the camera so the quad always faces it - the
         // QuadMesh normal is +Z, so any other basis shows the sprite edge-on as a thin line.
         const Vector3 direction = get_sun_direction();
         const Vector3 camera_global = camera->get_global_position();
+        double pin_distance = kSunSpriteDistance;
+        if ( const Camera3D *camera3d = godot::Object::cast_to<Camera3D>( camera ) )
+        {
+            pin_distance = std::min( pin_distance,
+                                     static_cast<double>( camera3d->get_far() ) * 0.5 );
+        }
         const Vector3 centre_global =
-            camera_global + direction * static_cast<float>( kSunSpriteDistance );
+            camera_global + direction * static_cast<float>( pin_distance );
 
         // Angular size: 2*tan(theta)*distance, where theta spans the disc plus its glow skirt.
         // SUN_GLOW_LENGTH_TS is the skirt's half-extent measured in disc radii, hence the
         // (1 + 2*ts) factor - the same expression as the reference.
         const double angular_radius = kSolarAngularRadius * sun_angular_scale_;
         const double size = 2.0 * std::tan( angular_radius ) *
-                            ( 1.0 + 2.0 * kSunGlowLengthTs ) * kSunSpriteDistance;
+                            ( 1.0 + 2.0 * kSunGlowLengthTs ) * pin_distance;
         sun_quad_->set_size( Vector2( static_cast<float>( size ), static_cast<float>( size ) ) );
 
         sun_->set_global_transform(
@@ -1443,7 +1457,7 @@ namespace tiles3d
         GlobeAtmosphereShading::publish(
             viewer_y_up, camera_height, camera_distance, sun_y_up,
             ground_atmosphere_intensity_, atmosphere_intensity_, fade,
-            ground_atmosphere_ && show_atmosphere_, true );
+            ground_atmosphere_ && show_atmosphere_, show_sun_ );
 
         // Two values that are per-node rather than per-frame, but global anyway so the tiles -
         // which GlobeTileLayer builds without any reference back to this node - see the same

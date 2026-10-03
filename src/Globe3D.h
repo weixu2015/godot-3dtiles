@@ -65,7 +65,10 @@ namespace tiles3d
         void set_albedo_texture( const godot::Ref<godot::Texture2D> &p_texture );
         godot::Ref<godot::Texture2D> get_albedo_texture() const;
 
-        /// Draws latitude/longitude lines. Useful while the texture pipeline is absent.
+        /// Draws latitude/longitude lines. A build-time debug aid for the bare ellipsoid:
+        /// once real tiles stream, the lines sit at a fixed +1 km altitude and fight the
+        /// tile surfaces for depth, showing up as dashes along tile boundaries that read
+        /// as LOD cracks. Default off; turn on only for a bare-globe sanity check.
         void set_show_graticule( bool p_value );
         bool get_show_graticule() const;
 
@@ -226,7 +229,7 @@ namespace tiles3d
         // and the terminator were applied; this keeps the lit side legible.
         godot::Color base_color_{ 0.22f, 0.42f, 0.72f, 1.0f };
         godot::Ref<godot::Texture2D> albedo_texture_;
-        bool show_graticule_ = true;
+        bool show_graticule_ = false;
         // -1 = auto (hide while tiles render), 0 = never, 1 = always. See set_show_surface.
         int show_surface_ = -1;
         // Last applied visibility, so the per-frame auto check only touches the node on a
@@ -236,14 +239,14 @@ namespace tiles3d
         bool show_atmosphere_ = true;
         double atmosphere_scale_ = 1.025;
         godot::Color atmosphere_color_{ 1.0f, 1.0f, 1.0f, 1.0f };
-        // The reference's own value is 50.0 (atmosphere.ts, uAtmosphereLightIntensity). This is
-        // 45.0 and the gap is deliberate: measured, not inherited. Raising it to 50 changes 0.27%
-        // of pixels with a peak channel delta of 58/255, entirely in the ring outside the
-        // silhouette - below the step an 8-bit frame makes visible, which is why every audit
-        // number was bit-identical across 45 / 50 / 70. Matching the reference exactly would buy
-        // an unmeasurable difference and cost a second value to keep in sync, so the reference
-        // stays the standard for the *arithmetic* and this stays the shipped number.
-        double atmosphere_intensity_ = 45.0;
+        // The reference's own value is 50.0 (atmosphere.ts, uAtmosphereLightIntensity); the
+        // first port shipped 45.0, measured bit-identical to the reference at globe-view
+        // distances. 45 also drives the limb halo into saturated white from the day-facing
+        // views (Mie forward lobe over the Rayleigh blue), which is the "atmosphere glow too
+        // bright" report - so the shipped value is now 25.0: the rim keeps its colour and
+        // falls off before it blows out. Tunable per scene; the *arithmetic* stays the
+        // reference's.
+        double atmosphere_intensity_ = 25.0;
         double atmosphere_sunset_tint_ = 0.65;
         bool atmosphere_debug_pure_ = false;
 
@@ -256,9 +259,11 @@ namespace tiles3d
         // straight down, hundreds of km deep at the limb. That gradient is most of what makes
         // the sphere read as a sphere with air on it.
         bool ground_atmosphere_ = true;
-        // 10.0, not the shell's 45: the reference drives the ground pass from a separate
-        // uGroundLightIntensity = 10.0, and reusing the shell value washes the disc out.
-        double ground_atmosphere_intensity_ = 10.0;
+        // The reference drives the ground pass from uGroundLightIntensity = 10.0; reusing the
+        // shell value washes the disc out. 6.0 rather than the reference's 10.0: at grazing
+        // angles (the limb) the veil's exposure curve saturates the imagery to white, which
+        // read as a "radiating" pole/rim on day-facing views. Tunable per scene.
+        double ground_atmosphere_intensity_ = 6.0;
         // When true, the effect fades in over camDist 6.5e6-9.0e6 m like the reference's
         // uLightingFade. Exposed because a close-up of the dataset is a legitimate thing to
         // want, and at 300 m altitude the reference would render no atmosphere at all.
@@ -280,6 +285,11 @@ namespace tiles3d
     public:
         /// Draws a sun glow billboard in the sub-solar direction, pinned to the camera so its
         /// angular size is constant and it never goes behind the far plane.
+        ///
+        /// This is the scene's master sun switch, not just the billboard's: unchecked means
+        /// "no sun", so the atmosphere's day/night shading is disabled with it (flat-lit
+        /// globe, no terminator). The night side cannot be toggled independently of the
+        /// billboard because both come from the same sub-solar direction.
         void set_show_sun( bool p_value );
         bool get_show_sun() const;
 
