@@ -27,7 +27,11 @@ extern/*
 # source; keep it out of the repository so `git add -A` cannot sweep it in.
 .workbuddy/
 
-# generated godot import/uid sidecars at the project root of the demo
+# generated godot import/uid sidecars at the project root of the demo. Godot 4.4+
+# writes a .uid next to every script and resource; they are machine-local and
+# regenerate on open, so none of them belong in the repository.
 demo/addons/godot-3dtiles.gdextension.uid
+demo/**/*.uid
+demo/*.uid
 
 lib/
