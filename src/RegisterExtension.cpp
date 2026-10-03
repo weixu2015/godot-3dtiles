@@ -36,9 +36,8 @@ namespace
         godot::ClassDB::register_class<LongitudeLatitudeHeight>();
         godot::ClassDB::register_class<EarthCenteredEarthFixed>();
 
-        // The georeference and the tileset node. Tileset3D currently parses a tileset and
-        // draws its bounding volumes as wireframes; content rendering arrives with phases 3
-        // and 4 of docs/REFACTOR_PLAN.md.
+        // The georeference and the tileset node. See docs/ARCHITECTURE.md 2.2 for the node
+        // model and the rules that connect them.
         godot::ClassDB::register_class<Georeference3D>();
         godot::ClassDB::register_class<Tileset3D>();
     }

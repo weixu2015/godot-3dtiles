@@ -5,7 +5,7 @@
 # Hard rule: nothing in this directory (or below it) may include a Godot header
 # (godot_cpp/*) or a Cesium header (Cesium*). It must stay a plain C++20 library so
 # it can be unit tested without an engine and so no engine API is ever touched from a
-# worker thread. Enforced by the CI gate described in docs/REFACTOR_PLAN.md 6.4.
+# worker thread. See docs/ARCHITECTURE.md 2 (architectural layering).
 
 add_library( tiles3d_core STATIC )
 

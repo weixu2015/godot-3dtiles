@@ -2,15 +2,12 @@
 //
 // Tileset3D: a 3D Tiles tileset node.
 //
-// Current stage: reads a tileset.json, builds the tile tree with the engine-agnostic
-// kernel, and visualises the tile bounding volumes as wireframes. Content (b3dm / glb
-// meshes and textures) is NOT rendered yet - that needs the traversal scheduler (phase 3)
-// and the content pipeline (phase 4) from docs/REFACTOR_PLAN.md.
-//
-// The wireframe is deliberate and not just a placeholder: it makes the whole frame chain
-// observable - parse, georeference, region conversion, world matrix accumulation - without
-// depending on any content pipeline. It is the cheapest possible check that a dataset is
-// interpreted correctly, and it exercises the D1 invariant for real.
+// Reads a tileset.json, builds the tile tree with the engine-agnostic kernel, walks it with
+// the screen-space-error scheduler and assembles b3dm / glb content (Draco + KTX2 included)
+// into Godot meshes. The bounding-volume wireframe is still available as a debug toggle: it
+// makes the whole frame chain observable - parse, georeference, region conversion, world
+// matrix accumulation - without depending on the content pipeline, and it exercises the
+// documented frame invariant for real. See docs/ARCHITECTURE.md 3 and 4.
 
 #ifndef TILESET_3D_H
 #define TILESET_3D_H
@@ -153,7 +150,7 @@ namespace tiles3d
 
         /// ECEF -> render frame. With a Georeference3D ancestor this is that node's
         /// ecef_to_local(); without one it is the implicit frame (ENU at the dataset's own
-        /// ECEF centre, Z-up flipped to Godot Y-up). See docs/REFACTOR_PLAN.md D1.
+        /// ECEF centre, Z-up flipped to Godot Y-up). See docs/ARCHITECTURE.md 3.3.
         math::Mat4 compute_model_matrix() const;
 
         /// Strips a file:// prefix so Godot's FileAccess can open the result.
@@ -244,8 +241,9 @@ namespace tiles3d
         /// Prints the tile tree to the Godot console, `max_depth` levels deep.
         void dump_tree( int max_depth ) const;
 
-        /// Editor configuration warnings for rules ③ and ④ (see docs/REFACTOR_PLAN.md):
-        /// multiple Tileset3D without a shared Georeference3D, and nested Tileset3D. Must be
+        /// Editor configuration warnings for the multi-tileset rules (see
+        /// docs/ARCHITECTURE.md 2.2): multiple Tileset3D without a shared Georeference3D,
+        /// and nested Tileset3D. Must be
         /// public - the base Node declares it public and godot-cpp's register_virtuals needs
         /// access to bind it.
         godot::PackedStringArray _get_configuration_warnings() const override;

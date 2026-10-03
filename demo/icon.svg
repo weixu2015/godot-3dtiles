@@ -1,1 +1,125 @@
-<svg t="1736131442887" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="5394" width="32" height="32"><path d="M135.7 696.9c20.8-10.9 40.3-19 57.2-30.8 12.6-8.8 22.6-21.9 32.2-34.3 31.5-40.3 62.2-81.1 93.3-121.7 10.6-13.9 21.1-27.8 31.9-41.5 23.2-29.5 52.3-29.6 75.9 0.5 23.5 30 46 60.8 69.2 91.1 23.6 30.9 45.8 63.1 71.5 92.2 47.8 54 120.5 52.1 165.7-4.1 36.1-44.9 69.8-91.6 104.8-137.4 13.1-17.1 26.5-33.9 40.4-50.3 9.2-10.9 21.5-15.6 36-13.5 15.4 2.2 23.6 10.9 25 26.4 9.3 105.4-18.8 200.7-80.7 285.4-39.5 54-90 96.2-150.6 126.4-40.8 20.3-83.3 33.9-127.9 41.3-52.2 8.7-104.4 6.4-155.9-5.4-73.4-16.7-138.3-49.6-194.6-100.3-35.2-31.7-62.9-68.6-86.6-109.1-3.2-5.5-5.3-11.6-6.8-14.9z" p-id="5395" fill="#709C49"></path><path d="M880.7 303.2c-23.7-40.5-51.4-77.4-86.6-109.1-56.3-50.7-121.2-83.6-194.6-100.3-51.5-11.7-103.7-14-155.9-5.4-44.6 7.4-87.1 21-127.9 41.3-60.6 30.2-111.1 72.3-150.6 126.4-61.9 84.7-90 180-80.7 285.4 1.4 15.5 9.6 24.2 25 26.4 14.5 2.1 26.8-2.6 36-13.5 13.9-16.4 27.3-33.2 40.4-50.3 35-45.7 68.7-92.5 104.8-137.4 45.2-56.2 118-58.1 165.7-4.1 25.7 29.1 47.9 61.3 71.5 92.2 23.1 30.3 45.7 61.1 69.2 91.1 23.6 30.1 52.8 30.1 75.9 0.5 10.8-13.7 21.3-27.7 31.9-41.5 31-40.6 61.8-81.4 93.3-121.7 9.7-12.4 19.6-25.4 32.2-34.3 16.9-11.8 36.4-19.9 57.2-30.8-1.4-3.4-3.6-9.5-6.8-14.9z m-220.5 21.7c-26.6 0-48.2-21.6-48.2-48.2s21.6-48.2 48.2-48.2 48.2 21.6 48.2 48.2-21.6 48.2-48.2 48.2z" p-id="5396" fill="#709C49"></path></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="godot-3dtiles icon">
+  <title>godot-3dtiles</title>
+
+  <defs>
+    <!-- Ocean: deep blue, lighter toward the upper-left light source so the disc reads
+         as a sphere rather than a flat badge. -->
+    <radialGradient id="ocean" cx="34%" cy="28%" r="84%">
+      <stop offset="0%"   stop-color="#4A9BC4"/>
+      <stop offset="52%"  stop-color="#2C6C93"/>
+      <stop offset="100%" stop-color="#153A52"/>
+    </radialGradient>
+
+    <!-- Continents. Two greens so overlapping landmasses separate without a stroke. -->
+    <linearGradient id="landA" x1="8%" y1="0%" x2="92%" y2="100%">
+      <stop offset="0%"   stop-color="#9ACC77"/>
+      <stop offset="100%" stop-color="#5E8C4C"/>
+    </linearGradient>
+    <linearGradient id="landB" x1="0%" y1="10%" x2="80%" y2="100%">
+      <stop offset="0%"   stop-color="#B4DC92"/>
+      <stop offset="100%" stop-color="#6F9E59"/>
+    </linearGradient>
+
+    <!-- Rivers: cool cyan, brightest at the headwaters. -->
+    <linearGradient id="river" x1="0%" y1="0%" x2="60%" y2="100%">
+      <stop offset="0%"   stop-color="#C6F1FA"/>
+      <stop offset="100%" stop-color="#63BAD6"/>
+    </linearGradient>
+
+    <!-- Peaks on the horizon: a lit face and a shaded face give them volume. -->
+    <linearGradient id="peakLit" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#E2EDDB"/>
+      <stop offset="100%" stop-color="#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="peakShade" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#63815B"/>
+      <stop offset="100%" stop-color="#38522F"/>
+    </linearGradient>
+
+    <!-- Keep terrain, rivers and peaks strictly inside the globe. -->
+    <clipPath id="disc">
+      <circle cx="64" cy="64" r="47"/>
+    </clipPath>
+
+    <!-- Terminator: darkens the lower-right so the sphere has a light direction. -->
+    <radialGradient id="terminator" cx="34%" cy="28%" r="80%">
+      <stop offset="58%"  stop-color="#04141F" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#04141F" stop-opacity="0.62"/>
+    </radialGradient>
+
+    <!-- Specular hotspot at the light source. -->
+    <radialGradient id="specular" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Globe body -->
+  <g clip-path="url(#disc)">
+    <circle cx="64" cy="64" r="47" fill="url(#ocean)"/>
+
+    <!-- Main landmass in the lower-left: a continent with a coast that wanders, so the
+         silhouette reads as geography rather than a blob. Open ocean is deliberately left
+         visible on all four sides. -->
+    <path fill="url(#landA)"
+          d="M12 92
+             C18 84 26 86 32 79
+             C38 72 35 64 43 58
+             C51 52 58 58 64 53
+             C70 48 68 41 74 38
+             C80 35 86 40 90 36
+             C84 48 88 56 82 64
+             C76 72 68 74 62 82
+             C56 90 58 100 50 108
+             C42 116 22 112 12 104 Z"/>
+
+    <!-- Secondary landmass in the upper-right, smaller and lighter. -->
+    <path fill="url(#landB)"
+          d="M70 24
+             C78 20 86 24 92 20
+             C100 15 106 20 112 4
+             L114 40
+             C106 44 100 38 94 42
+             C88 46 84 54 76 52
+             C70 50 66 42 68 34 Z"/>
+
+    <!-- Rivers: one trunk draining from the northern highlands down through the main
+         continent, with tributaries that taper as they climb. -->
+    <g fill="none" stroke="url(#river)" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M92 50 C86 58 84 66 77 72 C70 78 66 86 60 92 C55 97 52 102 50 108"
+            stroke-width="3.4"/>
+      <path d="M74 62 C71 67 68 70 62 74" stroke-width="2.2"/>
+      <path d="M84 60 C79 64 76 67 71 70" stroke-width="1.8"/>
+      <path d="M58 88 C60 92 60 96 59 100" stroke-width="1.5" opacity="0.85"/>
+    </g>
+
+    <!-- Peaks along the horizon, sized so the largest sits on the main continent and
+         stays clear of the globe's centre. -->
+    <g stroke-linejoin="round">
+      <path fill="url(#peakShade)" d="M56 66 L68 38 L80 66 Z"/>
+      <path fill="url(#peakLit)"   d="M68 38 L56 66 L63 66 L68 50 Z"/>
+      <path fill="url(#peakShade)" opacity="0.93" d="M78 72 L88 50 L98 72 Z"/>
+      <path fill="url(#peakLit)"   opacity="0.93" d="M88 50 L78 72 L84 72 L88 60 Z"/>
+      <path fill="url(#peakShade)" opacity="0.82" d="M40 78 L48 60 L56 78 Z"/>
+      <path fill="url(#peakLit)"   opacity="0.82" d="M48 60 L40 78 L45 78 L48 68 Z"/>
+    </g>
+
+    <!-- Lighting -->
+    <circle cx="64" cy="64" r="47" fill="url(#terminator)"/>
+    <ellipse cx="46" cy="42" rx="19" ry="14" fill="url(#specular)" transform="rotate(-28 46 42)"/>
+  </g>
+
+  <!-- Rim: a thin dark edge plus a faint highlight arc sells the sphere's silhouette. -->
+  <circle cx="64" cy="64" r="47" fill="none" stroke="#0C2A3C" stroke-width="2.6" opacity="0.6"/>
+  <path d="M31 31 C40 22 52 17 64 17" fill="none" stroke="#BFE9F5" stroke-width="2"
+        stroke-linecap="round" opacity="0.35"/>
+
+  <!-- Orbit arc: a single tilted ring signals a geospatial/spatial dataset. Deliberately
+       NOT a lat/long graticule, which is the Cesium logo's signature. -->
+  <ellipse cx="64" cy="64" rx="59" ry="20.5" fill="none" stroke="#7FD0E8"
+           stroke-width="2.6" opacity="0.42" transform="rotate(-26 64 64)"/>
+
+  <!-- Satellite: small, warm, offset from the ring's ends so it reads as a marker. -->
+  <circle cx="118" cy="44" r="4.8" fill="#F5B942"/>
+  <circle cx="118" cy="44" r="8.2" fill="#F5B942" opacity="0.2"/>
+</svg>

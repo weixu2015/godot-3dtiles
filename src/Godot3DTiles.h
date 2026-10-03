@@ -11,7 +11,7 @@ namespace tiles3d
     /// Extension metadata, exposed to GDScript as the `Godot3DTiles` class.
     ///
     /// This used to be called `Cesium`; the rename is part of dropping the Cesium
-    /// dependency entirely (docs/REFACTOR_PLAN.md D-4).
+    /// dependency entirely (docs/ARCHITECTURE.md 7, D-3).
     class Godot3DTiles : public godot::Object
     {
         GDCLASS( Godot3DTiles, godot::Object )

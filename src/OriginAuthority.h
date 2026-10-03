@@ -2,8 +2,8 @@
 //
 // Origin resources for the georeference: either a geodetic position or a raw ECEF one.
 //
-// These were called `CesiumOriginAuthority` before the rename (docs/REFACTOR_PLAN.md
-// D-4). The class names themselves are standard geodesy terms, not Cesium vocabulary, so
+// These were called `CesiumOriginAuthority` before the rename (docs/ARCHITECTURE.md 7,
+// D-3). The class names themselves are standard geodesy terms, not Cesium vocabulary, so
 // they stay; only the namespace and the signal name changed.
 
 #ifndef ORIGIN_AUTHORITY_H

@@ -34,4 +34,9 @@ demo/addons/godot-3dtiles.gdextension.uid
 demo/**/*.uid
 demo/*.uid
 
+# Screenshots written by the audit harnesses (demo/dataset_audit.gd,
+# demo/implicit_audit.gd). They are local verification artefacts - useful to look at,
+# not source. Regenerate with the scenes described in docs/ARCHITECTURE.md 5.4.
+demo/audit_shots/
+
 lib/
