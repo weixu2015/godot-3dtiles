@@ -333,11 +333,6 @@ namespace tiles3d
         godot::String get_last_error() const;
         bool is_placed_by_georeference() const;
 
-        /// Bounding-sphere radius of the whole dataset, in metres, as measured at load time.
-        /// Zero until a tileset has loaded. Exposed so host code (debug HUDs, test harnesses)
-        /// can frame the dataset without re-deriving it from the tile tree.
-        double get_dataset_radius() const;
-
         /// Tiles whose content is currently attached, and how many were selected for
         /// rendering on the last traversal.
         std::size_t get_loaded_tile_count() const;

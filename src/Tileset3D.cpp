@@ -401,7 +401,6 @@ namespace tiles3d
                               &Tileset3D::get_anchor_separation );
         ClassDB::bind_method( D_METHOD( "is_placed_by_georeference" ),
                               &Tileset3D::is_placed_by_georeference );
-        ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
         ClassDB::bind_method( D_METHOD( "get_loaded_tile_count" ),
                               &Tileset3D::get_loaded_tile_count );
         ClassDB::bind_method( D_METHOD( "get_last_rendered_count" ),
@@ -1389,11 +1388,6 @@ namespace tiles3d
     bool Tileset3D::is_placed_by_georeference() const
     {
         return placed_by_georeference;
-    }
-
-    double Tileset3D::get_dataset_radius() const
-    {
-        return dataset_radius;
     }
 
     void Tileset3D::dump_tree( const int max_depth ) const
