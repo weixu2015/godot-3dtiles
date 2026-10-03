@@ -36,12 +36,24 @@ namespace tiles3d::core
         Blend = 2,
     };
 
+    /// Image payload encodings the reader can hand to the Godot layer. KTX2 is not a
+    /// raw pixel format: it has to be transcoded first (see Ktx2Decoder), which is why
+    /// it is distinguished from "an opaque blob the engine can decode itself".
+    enum class ImageEncoding : std::int32_t
+    {
+        Unknown = 0,
+        Png,
+        Jpeg,
+        Ktx2,
+    };
+
     struct GltfImageData
     {
         /// Bytes of the image, as a span into GltfModel::bin (embedded image).
         std::size_t offset = 0;
         std::size_t length = 0;
-        std::string mimeType; // "image/jpeg" / "image/png"; empty when unspecified
+        std::string mimeType; // "image/jpeg" / "image/png" / "image/ktx2"; empty when unspecified
+        ImageEncoding encoding = ImageEncoding::Unknown;
     };
 
     struct GltfTextureData

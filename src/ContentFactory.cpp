@@ -6,6 +6,7 @@
 
 #include "core/content/B3dmParser.h"
 #include "core/content/GltfReader.h"
+#include "core/content/Ktx2Decoder.h"
 
 #include "godot_cpp/classes/array_mesh.hpp"
 #include "godot_cpp/classes/base_material3d.hpp"
@@ -148,22 +149,51 @@ namespace tiles3d
             Ref<Image> image;
             image.instantiate();
 
-            const PackedByteArray bytes = toPackedByteArray( model.bin.data() + imageData.offset,
-                                                             imageData.length );
+            const std::byte *imageBytes = model.bin.data() + imageData.offset;
 
-            const bool isPng = imageData.mimeType == "image/png";
-            const bool isJpeg = imageData.mimeType == "image/jpeg";
-            const godot::Error decodeError =
-                isPng ? image->load_png_from_buffer( bytes )
-                      : isJpeg ? image->load_jpg_from_buffer( bytes )
-                               : godot::FAILED;
-
-            if ( decodeError != godot::OK )
+            // KTX2 is not a raw pixel format, so it cannot go through the engine's
+            // PNG/JPEG decoders: it has to be transcoded to RGBA8 first. Everything
+            // else keeps using the engine decoders, which also preserve the exact
+            // colour handling the PNG/JPEG paths already had.
+            if ( imageData.encoding == core::ImageEncoding::Ktx2 )
             {
-                error += " image " + std::to_string( texture.imageIndex ) +
-                         " could not be decoded (mimeType " +
-                         ( imageData.mimeType.empty() ? "<unset>" : imageData.mimeType ) + ");";
-                return nullptr;
+                core::Ktx2Image decoded;
+                std::string decodeReason;
+                if ( !core::decodeKtx2( reinterpret_cast<const std::uint8_t *>( imageBytes ),
+                                        imageData.length, decoded, decodeReason ) )
+                {
+                    error += " image " + std::to_string( texture.imageIndex ) +
+                             " is KTX2 but could not be transcoded (" + decodeReason + ");";
+                    return nullptr;
+                }
+
+                const PackedByteArray pixels = toPackedByteArray(
+                    reinterpret_cast<const std::byte *>( decoded.pixels.data() ),
+                    decoded.pixels.size() );
+                image->set_data( static_cast<int>( decoded.width ),
+                                 static_cast<int>( decoded.height ), false,
+                                 godot::Image::FORMAT_RGBA8, pixels );
+            }
+            else
+            {
+                const PackedByteArray bytes = toPackedByteArray( imageBytes,
+                                                                 imageData.length );
+
+                const bool isPng = imageData.encoding == core::ImageEncoding::Png;
+                const bool isJpeg = imageData.encoding == core::ImageEncoding::Jpeg;
+                const godot::Error decodeError =
+                    isPng ? image->load_png_from_buffer( bytes )
+                          : isJpeg ? image->load_jpg_from_buffer( bytes )
+                                   : godot::FAILED;
+
+                if ( decodeError != godot::OK )
+                {
+                    error += " image " + std::to_string( texture.imageIndex ) +
+                             " could not be decoded (mimeType " +
+                             ( imageData.mimeType.empty() ? "<unset>" : imageData.mimeType ) +
+                             ");";
+                    return nullptr;
+                }
             }
 
             bool generateMipmaps = false;

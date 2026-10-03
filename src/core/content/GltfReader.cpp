@@ -28,6 +28,7 @@ namespace tiles3d::core
 
         constexpr const char *kDracoExtension = "KHR_draco_mesh_compression";
         constexpr const char *kUnlitExtension = "KHR_materials_unlit";
+        constexpr const char *kBasisuExtension = "KHR_texture_basisu";
 
         constexpr std::uint32_t kComponentSByte = 5120u;
         constexpr std::uint32_t kComponentUByte = 5121u;
@@ -583,11 +584,11 @@ namespace tiles3d::core
             error = "EXT_meshopt_compression is not supported";
             return false;
         }
-        if ( arrayMentions( document, "extensionsRequired", "KHR_texture_basisu" ) )
-        {
-            error = "KHR_texture_basisu is not supported";
-            return false;
-        }
+
+        // KHR_texture_basisu is *not* rejected. It is a required extension in every
+        // 3D Tiles 1.1 tileset produced by the Cesium ion tiling pipeline, and the
+        // transcoder for it ships in extern/third_party/basisu. Textures that use it
+        // are resolved below through texture.extensions.KHR_texture_basisu.source.
 
         const auto buffersIt = document.find( "buffers" );
         if ( buffersIt == document.end() || !buffersIt->is_array() || buffersIt->empty() )
@@ -614,6 +615,19 @@ namespace tiles3d::core
             {
                 GltfImageData imageData;
                 imageData.mimeType = image.value( "mimeType", std::string() );
+
+                if ( imageData.mimeType == "image/png" )
+                {
+                    imageData.encoding = ImageEncoding::Png;
+                }
+                else if ( imageData.mimeType == "image/jpeg" )
+                {
+                    imageData.encoding = ImageEncoding::Jpeg;
+                }
+                else if ( imageData.mimeType == "image/ktx2" )
+                {
+                    imageData.encoding = ImageEncoding::Ktx2;
+                }
 
                 const std::string uri = image.value( "uri", std::string() );
                 const auto bufferViewIt = image.find( "bufferView" );
@@ -668,6 +682,28 @@ namespace tiles3d::core
                 GltfTextureData textureData;
                 textureData.imageIndex =
                     static_cast<std::int32_t>( readIntField( texture, "source", -1 ) );
+
+                // KHR_texture_basisu replaces "source" with an extension-local one:
+                //   "textures": [ { "sampler": 0,
+                //                   "extensions": { "KHR_texture_basisu": { "source": 0 } } } ]
+                // The tile payload in the 1.1 Photogrammetry dataset has no top-level
+                // "source" at all, so without this the texture resolves to image -1 and
+                // the material loses its albedo map.
+                if ( const auto extIt = texture.find( "extensions" );
+                     extIt != texture.end() && extIt->is_object() )
+                {
+                    const auto basisuIt = extIt->find( kBasisuExtension );
+                    if ( basisuIt != extIt->end() && basisuIt->is_object() )
+                    {
+                        const std::int64_t basisuSource =
+                            readIntField( *basisuIt, "source", -1 );
+                        if ( basisuSource >= 0 )
+                        {
+                            textureData.imageIndex = static_cast<std::int32_t>( basisuSource );
+                        }
+                    }
+                }
+
                 textureData.samplerIndex =
                     static_cast<std::int32_t>( readIntField( texture, "sampler", -1 ) );
 

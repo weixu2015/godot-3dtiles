@@ -101,20 +101,109 @@ set( TILES3D_DRACO_INCLUDE_DIRS
     "${CMAKE_BINARY_DIR}"
 )
 
-# Single interface target carrying everything the scheduler kernel needs.
-# Doctest is intentionally not part of it: it is only linked by the test executables.
-# Draco is a real static library, but it is routed through here so every consumer of the
-# kernel links it too - a static library does not carry its own dependencies.
-add_library( tiles3d_third_party INTERFACE )
-
-target_include_directories( tiles3d_third_party
+add_library( tiles3d_draco INTERFACE )
+target_include_directories( tiles3d_draco
     INTERFACE
         ${TILES3D_DRACO_INCLUDE_DIRS}
 )
+target_link_libraries( tiles3d_draco INTERFACE draco::draco )
+
+# ---------------------------------------------------------------------------
+# Basis Universal: the KTX2 transcoder behind glTF's KHR_texture_basisu.
+#
+# 3D Tiles 1.1 datasets tiled by the Cesium ion pipeline ship their textures as
+# KTX2 (supercompressed ETC1S/UASTC), and declare KHR_texture_basisu in
+# extensionsRequired. Godot's C++ bindings expose load_ktx_from_buffer (KTX1)
+# but no KTX2 entry point, so the transcode to plain RGBA8 has to happen here.
+#
+# Vendored rather than fetched, for the same reason as Draco: it is a native
+# library and the build machine may have no network at all. Only the transcoder
+# half is vendored - the encoder (which pulls tinyexr / lodepng / OpenCL) is not
+# needed to read tiles.
+#
+# Zstd is vendored as the official single-file amalgamation (built from the zstd
+# 1.5.7 tree with its own build/single_file_libs/combine.py) because KTX2 UASTC
+# payloads are zstd-supercompressed. basisu_transcoder.cpp only calls
+# ZSTD_decompress / ZSTD_isError, so a decoder-only build is sufficient - but the
+# amalgamation is used as generated rather than hand-trimmed.
+#
+# The transcoder is deliberately compiled as C++ here, not C: basisu_transcoder.cpp
+# is C++ and pulls in basisu_containers_impl.h; zstd.c is plain C compiled by the
+# C++ compiler, which zstd supports (it already guards for __cplusplus).
+# ---------------------------------------------------------------------------
+set( TILES3D_BASISU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/basisu" )
+
+if ( NOT EXISTS "${TILES3D_BASISU_DIR}/transcoder/basisu_transcoder.cpp" )
+    message(
+        FATAL_ERROR
+            "[${PROJECT_NAME}] The vendored Basis Universal transcoder is missing. "
+            "Expected ${TILES3D_BASISU_DIR}/transcoder/basisu_transcoder.cpp"
+    )
+endif()
+
+add_library( tiles3d_basisu STATIC
+    "${TILES3D_BASISU_DIR}/transcoder/basisu_transcoder.cpp"
+)
+
+# zstd.c is vendored as the official single-file amalgamation. It is added as C
+# rather than C++ because the project never enables the C language, so there is no
+# C compiler rule to fall back on if this is dropped: adding a .c source without
+# enable_language(C) is exactly what produced "Error required internal CMake
+# variable not set: CMAKE_C_COMPILE_OBJECT" during generate.
+set_source_files_properties( "${TILES3D_BASISU_DIR}/zstd/zstd.c"
+    TARGET_DIRECTORY tiles3d_basisu
+    PROPERTIES LANGUAGE CXX
+)
+target_sources( tiles3d_basisu PRIVATE "${TILES3D_BASISU_DIR}/zstd/zstd.c" )
+
+# zstd.h is found by basisu_transcoder.cpp through this path ("#include \"zstd.h\""),
+# and zstd.h itself includes zstd_errors.h from the same directory, so both the
+# transcoder and zstd dirs have to be on the include path. The transcoder dir is
+# PUBLIC because src/core/content/Ktx2Decoder.cpp includes "basisu_transcoder.h".
+target_include_directories( tiles3d_basisu
+    PUBLIC
+        "${TILES3D_BASISU_DIR}/transcoder"
+    PRIVATE
+        "${TILES3D_BASISU_DIR}/zstd"
+)
+
+# MSVC needs this because basisu_transcoder.cpp is a very large translation unit
+# (24000 lines) whose tables alone allocate a lot of read-only data, and because
+# /utf-8 keeps the source's non-ASCII comments from being misinterpreted under a
+# non-UTF-8 ACP. /bigobj is required outright: without it the object file exceeds
+# the COFF section limit (C1128).
+if ( MSVC )
+    target_compile_options( tiles3d_basisu PRIVATE /bigobj /utf-8 )
+endif()
+
+# basisu ships encoder sources that assume a relaxed warning set, and the vendored
+# tree is not ours to fix. Suppress just the codes that fire, not the whole analysis:
+#   C4244 conversion, may lose data          - everywhere in the DCT/idct tables
+#   C4267 size_t -> smaller type
+#   C4838 narrowing conversion in braces
+#   C4996 deprecated CRT (strcpy / fopen)    - the file-IO helper path
+if ( MSVC )
+    target_compile_options( tiles3d_basisu PRIVATE
+        /wd4244
+        /wd4267
+        /wd4838
+        /wd4996
+    )
+else()
+    target_compile_options( tiles3d_basisu PRIVATE -w )
+endif()
+
+# Single interface target carrying everything the scheduler kernel needs.
+# Doctest is intentionally not part of it: it is only linked by the test executables.
+# Draco and Basis Universal are real static libraries, but they are routed through
+# here so every consumer of the kernel links them too - a static library does not
+# carry its own dependencies.
+add_library( tiles3d_third_party INTERFACE )
 
 target_link_libraries( tiles3d_third_party
     INTERFACE
         glm::glm
         nlohmann_json::nlohmann_json
-        draco::draco
+        tiles3d_draco
+        tiles3d_basisu
 )
