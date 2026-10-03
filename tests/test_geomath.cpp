@@ -7,8 +7,11 @@
 
 #include "math/GeoMath.h"
 #include "math/Mat4.h"
+#include "tiles/TilesetJson.h"
 
 #include <glm/geometric.hpp>
+
+#include <nlohmann/json.hpp>
 
 #include <cmath>
 #include <cstdint>
@@ -280,4 +283,109 @@ TEST_CASE( "eastNorthUpToFixedFrame maps local axes to east, north and up" )
     // with an absolute bound (a micron) because of the cancellation floor described above.
     const Vec3 raised = transformPoint( frame, Vec3( 0.0, 0.0, 1500.0 ) );
     CHECK( std::abs( glm::length( raised - kAnchorEcef ) - 1500.0 ) < 1e-6 );
+}
+
+// ---------------------------------------------------------------------------
+// Degenerate ENU origins
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    /// True when every component of the matrix is finite.
+    bool allFinite( const Mat4 &m )
+    {
+        for ( int column = 0; column < 4; ++column )
+        {
+            for ( int row = 0; row < 4; ++row )
+            {
+                if ( !std::isfinite( m[column][row] ) )
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+} // namespace
+
+TEST_CASE( "eastNorthUpToFixedFrame collapses at the ECEF origin" )
+{
+    // Documents *why* the implicit frames in Tileset3D guard their origin: at (0,0,0) the
+    // surface normal is undefined, normalizeSafe returns the zero vector unchanged, and the
+    // resulting matrix is singular. invert() then yields NaNs, which is what made Godot
+    // report `Condition "!v.is_finite()"` for the Icospheres dataset (a local tileset whose
+    // root box is centred on the origin).
+    //
+    // This test asserts the sharp edge deliberately: if a future change makes this function
+    // total (e.g. by falling back to an arbitrary frame), this test should be updated
+    // alongside the caller's guard, not silently deleted.
+    const Mat4 frame = eastNorthUpToFixedFrame( Vec3( 0.0, 0.0, 0.0 ) );
+
+    // The rotation block degenerates to all zeros - the columns are not unit length.
+    CHECK( glm::length( Vec3( frame[0] ) ) == doctest::Approx( 0.0 ) );
+    CHECK( glm::length( Vec3( frame[1] ) ) == doctest::Approx( 0.0 ) );
+    CHECK( glm::length( Vec3( frame[2] ) ) == doctest::Approx( 0.0 ) );
+
+    // Inverting a singular matrix produces non-finite entries, which is exactly the failure
+    // the caller prevents by not building a frame here at all.
+    const Mat4 inverted = invert( frame );
+    CHECK_FALSE( allFinite( inverted ) );
+}
+
+TEST_CASE( "invert of an identity root transform stays finite for self-authored tilesets" )
+{
+    // The path for datasets authored in their own coordinate space (Icospheres, and the
+    // Aerometrex payloads whose bounding sphere merely happens to sit on the ellipsoid): no
+    // declared anchor exists, so the model matrix is inverse(rootTransform). For the common
+    // identity case that is simply identity - finite, and it leaves the content in the
+    // coordinates the author wrote.
+    const Mat4 identity = tiles3d::math::identity();
+    const Mat4 model = invert( identity );
+
+    CHECK( allFinite( model ) );
+    for ( int column = 0; column < 4; ++column )
+    {
+        for ( int row = 0; row < 4; ++row )
+        {
+            const double expected = ( column == row ) ? 1.0 : 0.0;
+            CHECK( model[column][row] == doctest::Approx( expected ) );
+        }
+    }
+}
+
+TEST_CASE( "a parsed root tile records whether it declared a transform" )
+{
+    // The frame choice in Tileset3D::compute_model_matrix keys off *declaration*, not off
+    // the parsed values: an omitted transform and an explicit identity are numerically
+    // identical, yet only the second means the author stated where the dataset sits. This
+    // test pins both readings, because the flag is set at parse time and cannot be
+    // reconstructed from `transform` afterwards.
+    using tiles3d::core::parseTilesetJson;
+
+    const nlohmann::json withoutTransform = {
+        { "asset", { { "version", "1.0" } } },
+        { "root",
+          { { "boundingVolume", { { "sphere", { 0, 0, 0, 1 } } } },
+            { "geometricError", 1 },
+            { "content", { { "uri", "a.b3dm" } } } } }
+    };
+
+    const nlohmann::json withIdentityTransform = {
+        { "asset", { { "version", "1.0" } } },
+        { "root",
+          { { "boundingVolume", { { "sphere", { 0, 0, 0, 1 } } } },
+            { "transform",
+              { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } },
+            { "geometricError", 1 },
+            { "content", { { "uri", "a.b3dm" } } } } }
+    };
+
+    tiles3d::core::TilesetParseResult plain = parseTilesetJson( withoutTransform );
+    REQUIRE( plain.root != nullptr );
+    CHECK_FALSE( plain.root->hasDeclaredTransform );
+
+    tiles3d::core::TilesetParseResult explicitIdentity =
+        parseTilesetJson( withIdentityTransform );
+    REQUIRE( explicitIdentity.root != nullptr );
+    CHECK( explicitIdentity.root->hasDeclaredTransform );
 }
