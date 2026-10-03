@@ -1,12 +1,13 @@
-[gd_scene load_steps=8 format=3 uid="uid://cglobemain1"]
+[gd_scene format=3 uid="uid://cglobemain1"]
 
-[ext_resource type="Script" path="res://globe.gd" id="1_globe"]
+[ext_resource type="Script" uid="uid://c8rswhbasgo4m" path="res://globe.gd" id="1_globe"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_top_color = Color(0.004, 0.006, 0.018, 1)
 sky_horizon_color = Color(0.004, 0.006, 0.018, 1)
 ground_bottom_color = Color(0.004, 0.006, 0.018, 1)
 ground_horizon_color = Color(0.004, 0.006, 0.018, 1)
+sun_angle_max = 0.0
 
 [sub_resource type="Sky" id="Sky_2"]
 sky_material = SubResource("Sky_1")
@@ -20,76 +21,57 @@ ambient_light_sky_contribution = 0.5
 ambient_light_energy = 0.22
 tonemap_mode = 3
 tonemap_white = 4.0
-ssao_enabled = false
-glow_enabled = false
 
 [sub_resource type="LongitudeLatitudeHeight" id="LLH_anchor"]
-; Anchor = the 3D Tiles dataset's own origin (the Photogrammetry block). The georeference
-; origin has to sit on the dataset: every tile coordinate is measured from it, and a
-; dataset 12 000 km away lands at |coord| ~ 1.2e7, where float32 quantises to ~1 m.
-; Switch this back to 120.97 / 23.5 when the taiwan tileset is the one loaded below.
 longitude = -75.596707
 latitude = 40.038796
-height = 0.0
 
-[node name="GlobeMain" type="Node3D"]
+[node name="GlobeMain" type="Node3D" unique_id=901183343]
 script = ExtResource("1_globe")
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1713991585]
 environment = SubResource("Env_1")
 
-[node name="Sun" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.70710678, -0.35355339, 0.61237244, 0.0, 0.8660254, 0.5, -0.70710678, -0.35355339, 0.61237244, 0, 0, 0)
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=661745553]
+transform = Transform3D(0.70710677, -0.35355338, 0.61237246, 0, 0.8660254, 0.5, -0.70710677, -0.35355338, 0.61237246, 0, 0, 0)
 light_energy = 1.5
-shadow_enabled = false
 
-[node name="Georeference3D" type="Georeference3D" parent="."]
-; Z-up -> Y-up: M(v) = (vx, vz, -vy). The frame this node carries is ENU (Z-up, as the
-; kernel's eastNorthUpToFixedFrame emits); this transform is what makes the *world* the
-; Y-up space Godot and the camera controller expect - the same transform node_3d.tscn uses.
-transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
+[node name="Georeference3D" type="Georeference3D" parent="." unique_id=2079033416]
 origin_authority = SubResource("LLH_anchor")
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0)
 
-[node name="Globe3D" type="Globe3D" parent="Georeference3D"]
+[node name="Globe3D" type="Globe3D" parent="Georeference3D" unique_id=1257115317]
 radial_segments = 128
 rings = 64
-show_graticule = false
-show_atmosphere = true
-; 1.025 is the reference value, not a taste setting: the raymarch always integrates
-; ATMOSPHERE_THICKNESS (111 km) from the surface, and the shell only has to be large enough
-; to contain that volume. Anything above 1.025 moves a *surface* that is no longer visible.
-atmosphere_scale = 1.025
-atmosphere_color = Color(1, 1, 1, 1)
-atmosphere_intensity = 45.0
-atmosphere_sunset_tint = 0.65
-show_sun = true
-sun_angular_scale = 1.0
 
-[node name="GlobeTileLayer" type="GlobeTileLayer" parent="Georeference3D"]
+[node name="GlobeTileLayer" type="GlobeTileLayer" parent="Georeference3D" unique_id=1577043105]
 print_telemetry = true
 
-[node name="Tileset3D" type="Tileset3D" parent="Georeference3D"]
+[node name="Tileset3D" type="Tileset3D" parent="Georeference3D" unique_id=628325770]
 url = "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
 debug_show_bounding_volume = false
 
-[node name="GlobeCameraController" type="GlobeCameraController" parent="."]
+[node name="GlobeCameraController" type="GlobeCameraController" parent="." unique_id=380428357]
+near = 1.0
 far = 200000000.0
-near = 1000.0
 
-[node name="HUD" type="CanvasLayer" parent="."]
+[node name="HUD" type="CanvasLayer" parent="." unique_id=252955232]
 
-[node name="Panel" type="MarginContainer" parent="HUD"]
+[node name="Panel" type="MarginContainer" parent="HUD" unique_id=1594394931]
 offset_left = 12.0
 offset_top = 12.0
 offset_right = 332.0
 offset_bottom = 136.0
 
-[node name="Box" type="VBoxContainer" parent="HUD/Panel"]
+[node name="Box" type="VBoxContainer" parent="HUD/Panel" unique_id=1173782674]
+layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="HomeButton" type="Button" parent="HUD/Panel/Box"]
+[node name="HomeButton" type="Button" parent="HUD/Panel/Box" unique_id=591727516]
+layout_mode = 2
 text = "Home: fly to the 3D Tiles dataset"
 
-[node name="Status" type="Label" parent="HUD/Panel/Box"]
+[node name="Status" type="Label" parent="HUD/Panel/Box" unique_id=1469890104]
+layout_mode = 2
 text = "Tileset3D loading..."
 autowrap_mode = 2
