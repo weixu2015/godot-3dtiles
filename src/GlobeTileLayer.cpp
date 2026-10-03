@@ -1463,12 +1463,33 @@ namespace tiles3d
         // mercator linearity is what makes that exact.
         const math::TileRectangle &tr = tile->rectangle;
         const math::TileRectangle &sr = source->rectangle;
-        const double du = ( tr.east - tr.west ) / ( sr.east - sr.west );
-        const double u0 = ( tr.west - sr.west ) / ( sr.east - sr.west );
+        double du = ( tr.east - tr.west ) / ( sr.east - sr.west );
+        double u0 = ( tr.west - sr.west ) / ( sr.east - sr.west );
         const double smn = math::mercatorY( sr.north );
         const double sms = math::mercatorY( sr.south );
-        const double dv = ( math::mercatorY( tr.north ) - math::mercatorY( tr.south ) ) / ( smn - sms );
-        const double v0 = ( smn - math::mercatorY( tr.north ) ) / ( smn - sms );
+        double dv = ( math::mercatorY( tr.north ) - math::mercatorY( tr.south ) ) / ( smn - sms );
+        double v0 = ( smn - math::mercatorY( tr.north ) ) / ( smn - sms );
+
+        // Half-texel inset (ancestor sampling only). Tile rectangles are dyadic fractions
+        // of the ancestor's, so tile edges land EXACTLY on ancestor texel boundaries and
+        // the edge fragment row bilinear-blends ~50% of the neighbouring texel column -
+        // bright coast/cloud texels bleed across seams as dotted lines (probe-verified:
+        // a seam dot samples as 50% land texel + 50% sea). Shrinking the mapped rect by
+        // one texel centres the edge samples on the tile's own outermost texels, the same
+        // trick Cesium's imagery compositing uses. When source == tile the edges hit the
+        // texture border, where the default clamp-to-edge sampler is already clean, so no
+        // inset is applied there.
+        if ( source != tile )
+        {
+            const std::int64_t tex_w = source->texture->get_width();
+            const std::int64_t tex_h = source->texture->get_height();
+            const double texel_u = 1.0 / static_cast<double>( tex_w > 0 ? tex_w : 1 );
+            const double texel_v = 1.0 / static_cast<double>( tex_h > 0 ? tex_h : 1 );
+            du = std::max( du - texel_u, 0.0 );
+            dv = std::max( dv - texel_v, 0.0 );
+            u0 += 0.5 * texel_u;
+            v0 += 0.5 * texel_v;
+        }
 
         material->set_shader_parameter( "u_has_texture", true );
         material->set_shader_parameter( "u_albedo_texture", source->texture );
