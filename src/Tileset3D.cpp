@@ -6,6 +6,7 @@
 #include "Globe3D.h"
 #include "GodotMathConvert.h"
 
+#include "core/io/Url.h"
 #include "core/math/BoundingVolume.h"
 #include "core/math/Mat4.h"
 #include "core/math/ScreenSpaceError.h"
@@ -27,6 +28,7 @@
 #endif
 #include "godot_cpp/classes/engine.hpp"
 #include "godot_cpp/classes/file_access.hpp"
+#include "godot_cpp/classes/http_client.hpp"
 #include "godot_cpp/classes/mesh.hpp"
 #include "godot_cpp/classes/standard_material3d.hpp"
 #include "godot_cpp/classes/viewport.hpp"
@@ -36,6 +38,7 @@
 #include "godot_cpp/variant/array.hpp"
 #include "godot_cpp/variant/color.hpp"
 #include "godot_cpp/variant/packed_color_array.hpp"
+#include "godot_cpp/variant/packed_string_array.hpp"
 #include "godot_cpp/variant/packed_vector3_array.hpp"
 #include "godot_cpp/variant/utility_functions.hpp"
 
@@ -403,6 +406,8 @@ namespace tiles3d
                               &Tileset3D::get_loaded_tile_count );
         ClassDB::bind_method( D_METHOD( "get_last_rendered_count" ),
                               &Tileset3D::get_last_rendered_count );
+        ClassDB::bind_method( D_METHOD( "get_loaded_bytes" ), &Tileset3D::get_loaded_bytes );
+        ClassDB::bind_method( D_METHOD( "get_in_flight_count" ), &Tileset3D::get_in_flight_count );
 
         ADD_SIGNAL( godot::MethodInfo( "tileset_loaded" ) );
         ADD_SIGNAL( godot::MethodInfo( "load_failed", PropertyInfo( Variant::STRING, "reason" ) ) );
@@ -416,10 +421,21 @@ namespace tiles3d
         switch ( p_what )
         {
             case NOTIFICATION_READY:
+            {
                 // The traversal runs every frame through NOTIFICATION_PROCESS rather than a
                 // _process override: godot-cpp does not declare _process as a virtual on
                 // Node, so overriding it would not be called.
                 set_process( true );
+
+                // The loader is a child node so its lifetime follows this node's, and so its
+                // HTTPRequest children are torn down with the scene.
+                if ( loader == nullptr )
+                {
+                    loader = memnew( TilesetContentLoader );
+                    loader->set_name( "ContentLoader" );
+                    loader->set_max_concurrent( maximum_simultaneous_loads );
+                    add_child( loader );
+                }
 
                 // Convenience for editor testing: a node with a url in the scene loads as
                 // soon as it is ready.
@@ -428,6 +444,7 @@ namespace tiles3d
                     load();
                 }
                 break;
+            }
 
             case NOTIFICATION_PROCESS:
                 update_tiles();
@@ -553,7 +570,8 @@ namespace tiles3d
         String path = url.strip_edges();
 
         // Accept the file:// and file:/// forms as well as a plain path; FileAccess takes
-        // absolute OS paths and res:// paths directly.
+        // absolute OS paths and res:// paths directly. An http(s) URL is passed through
+        // untouched - read_document routes it to HTTP.
         if ( path.begins_with( "file:///" ) )
         {
             path = path.substr( 8 );
@@ -784,6 +802,17 @@ namespace tiles3d
 
     void Tileset3D::clear_loaded()
     {
+        // Cancel everything in flight first. The worker threads hold raw `core::Tile*` into
+        // the tree that is about to be destroyed, so they have to be told to stop and reaped
+        // before `root.reset()` runs. bump_generation() also makes any result that races in
+        // afterwards recognisable as stale, so it can never be adopted.
+        if ( loader != nullptr )
+        {
+            loader->bump_generation();
+            loader->cancel_before_generation( loader->get_generation() );
+            loader_generation = loader->get_generation();
+        }
+
         // Content nodes go first: loaded_tiles holds pointers into the tile tree, so it has
         // to be drained before root is destroyed.
         for ( core::Tile *tile : loaded_tiles )
@@ -817,6 +846,7 @@ namespace tiles3d
         frame_number = 0;
         last_rendered_count = 0;
         dataset_radius = 0.0;
+        loaded_bytes = 0;
         needs_framing = false;
         model_matrix_.reset();
     }
@@ -868,18 +898,19 @@ namespace tiles3d
             return;
         }
 
-        Ref<FileAccess> file = FileAccess::open( path, FileAccess::READ );
-        if ( file.is_null() )
+        // Fetch the document. Only the small control files go through this path; payloads are
+        // streamed by the loader. An http(s) URL is handled by a blocking request here because
+        // the tile tree cannot exist until the root document is parsed - there is nothing to
+        // show and nothing to schedule until then.
+        String text;
+        String readError;
+        if ( !read_document( path, text, readError ) )
         {
-            last_error = godot::vformat( "cannot open '%s' (error %d)", path,
-                                         static_cast<int>( FileAccess::get_open_error() ) );
+            last_error = readError;
             UtilityFunctions::printerr( "[Tileset3D] ", last_error );
             emit_signal( "load_failed", last_error );
             return;
         }
-
-        const String text = file->get_as_text();
-        file->close();
 
         // allow_exceptions = false: the kernel layer is exception free, and a discarded
         // document is easier to report than a thrown parse error.
@@ -907,8 +938,10 @@ namespace tiles3d
         model_up_axis_ = parsed.modelUpAxis;
         next_tile_id_ = parsed.nextId;
 
-        // Content URIs in a tileset are relative to the tileset document.
-        base_directory = path.get_base_dir();
+        // Content URIs in a tileset are relative to the tileset document. Kept as the document
+        // URL itself (not a directory) so core::resolveUrl can handle both an http base and a
+        // Windows path without the caller guessing which separator applies.
+        base_directory = path;
 
         // Splice in every nested tileset before anything else looks at the tree: the
         // traversal, the region conversion, the bounding volume debug mesh and the tile
@@ -1069,21 +1102,18 @@ namespace tiles3d
         if ( tile.content.has_value() && is_external_tileset_uri( tile.content->uri ) )
         {
             const String nestedPath = content_path( tile );
-            const String nestedDir = nestedPath.get_base_dir();
 
             bool merged = false;
 
-            Ref<FileAccess> file = FileAccess::open( nestedPath, FileAccess::READ );
-            if ( file.is_null() )
+            String text;
+            String readError;
+            if ( !read_document( nestedPath, text, readError ) )
             {
                 UtilityFunctions::printerr( "[Tileset3D] cannot open external tileset '",
-                                            nestedPath, "'" );
+                                            nestedPath, "': ", readError );
             }
             else
             {
-                const String text = file->get_as_text();
-                file->close();
-
                 nlohmann::json document =
                     nlohmann::json::parse( text.utf8().get_data(), nullptr, false );
 
@@ -1109,7 +1139,7 @@ namespace tiles3d
                         // URIs declared inside the external document are relative to *its*
                         // directory, not to the root tileset's, so the incoming subtree is
                         // rebased before it joins the tree.
-                        rebase_content_uris( externalRoot, nestedDir );
+                        rebase_content_uris( externalRoot, nestedPath );
 
                         // The container keeps its own bounding volume and geometric error:
                         // those describe the region in the *referencing* tileset's frame and
@@ -1148,20 +1178,19 @@ namespace tiles3d
         }
     }
 
-    void Tileset3D::rebase_content_uris( core::Tile &tile, const String &directory )
+    void Tileset3D::rebase_content_uris( core::Tile &tile, const String &documentUrl )
     {
         if ( tile.content.has_value() )
         {
             const String uri( tile.content->uri.c_str() );
-            if ( !uri.is_absolute_path() )
-            {
-                tile.content->uri = directory.path_join( uri ).utf8().get_data();
-            }
+            const std::string resolved =
+                core::resolveUrl( documentUrl.utf8().get_data(), uri.utf8().get_data() );
+            tile.content->uri = resolved;
         }
 
         for ( const std::unique_ptr<core::Tile> &child : tile.children )
         {
-            rebase_content_uris( *child, directory );
+            rebase_content_uris( *child, documentUrl );
         }
     }
 
@@ -1218,19 +1247,19 @@ namespace tiles3d
             String( core::replaceTemplate( decl.subtreeUriTemplate, rootLevel, subtreeX, subtreeY,
                                            subtreeZ )
                         .c_str() );
-        const String subtreePath =
-            subtreeUri.is_absolute_path() ? subtreeUri : base_directory.path_join( subtreeUri );
+        const String subtreePath = document_url( subtreeUri );
 
-        Ref<FileAccess> file = FileAccess::open( subtreePath, FileAccess::READ );
-        if ( file.is_null() )
+        // A subtree is binary and has to be decoded before any child tiles exist, so it goes
+        // through the blocking path rather than the concurrent loader. Sizes are in the tens
+        // of KB, and it is only fetched when a tile first wants to refine.
+        godot::PackedByteArray bytes;
+        String readError;
+        if ( !read_binary_document( subtreePath, bytes, readError ) )
         {
-            UtilityFunctions::printerr( "[Tileset3D] cannot open subtree '", subtreePath, "'" );
+            UtilityFunctions::printerr( "[Tileset3D] cannot open subtree '", subtreePath,
+                                        "': ", readError );
             return;
         }
-
-        const PackedByteArray bytes =
-            file->get_buffer( static_cast<std::int64_t>( file->get_length() ) );
-        file->close();
 
         core::SubtreeData subtree;
         std::string error;
@@ -1388,6 +1417,11 @@ namespace tiles3d
     void Tileset3D::set_maximum_simultaneous_loads( const int p_value )
     {
         maximum_simultaneous_loads = std::max( 1, p_value );
+
+        if ( loader != nullptr )
+        {
+            loader->set_max_concurrent( maximum_simultaneous_loads );
+        }
     }
 
     int Tileset3D::get_maximum_simultaneous_loads() const
@@ -1405,9 +1439,38 @@ namespace tiles3d
         return last_rendered_count;
     }
 
+    std::size_t Tileset3D::get_loaded_bytes() const
+    {
+        return loaded_bytes;
+    }
+
+    int Tileset3D::get_in_flight_count() const
+    {
+        return loader != nullptr ? static_cast<int>( loader->get_active_count() ) : 0;
+    }
+
     // ---------------------------------------------------------------------------
     // Content IO
     // ---------------------------------------------------------------------------
+
+    String Tileset3D::document_url( const String &reference ) const
+    {
+        // An already-absolute reference (full http URL, or a rooted local path) must not be
+        // joined again. core::resolveUrl would treat a Windows path as scheme-less and
+        // re-prefix it, so that case is filtered here.
+        const std::string referenceUtf8 = reference.utf8().get_data();
+
+        if ( core::hasUrlScheme( referenceUtf8 ) || reference.is_absolute_path() )
+        {
+            return reference;
+        }
+
+        // `base_directory` holds the root document's full URL (not a directory) so the same
+        // arithmetic serves a Windows path and an http URL. Doing it in the kernel keeps this
+        // resolution identical to the one the loader uses to decide local-vs-remote.
+        const std::string base = base_directory.utf8().get_data();
+        return String( core::resolveUrl( base, referenceUtf8 ).c_str() );
+    }
 
     String Tileset3D::content_path( const core::Tile &tile ) const
     {
@@ -1416,29 +1479,147 @@ namespace tiles3d
             return String();
         }
 
-        // A content URI is relative to the tileset document.
-        const String uri( tile.content->uri.c_str() );
-        return uri.is_absolute_path() ? uri : base_directory.path_join( uri );
+        return document_url( String( tile.content->uri.c_str() ) );
     }
 
-    PackedByteArray Tileset3D::read_tile_payload( const core::Tile &tile ) const
+    bool Tileset3D::read_document( const String &path, String &out_text,
+                                   String &out_error ) const
     {
-        const String path = content_path( tile );
-        if ( path.is_empty() )
+        godot::PackedByteArray bytes;
+
+        if ( !read_binary_document( path, bytes, out_error ) )
         {
-            return PackedByteArray();
+            return false;
         }
 
-        Ref<FileAccess> file = FileAccess::open( path, FileAccess::READ );
+        out_text = String::utf8( reinterpret_cast<const char *>( bytes.ptr() ),
+                                 static_cast<int>( bytes.size() ) );
+        return true;
+    }
+
+    bool Tileset3D::read_binary_document( const String &path, godot::PackedByteArray &out_bytes,
+                                          String &out_error ) const
+    {
+        const std::string pathUtf8 = path.utf8().get_data();
+
+        if ( core::isRemoteUrl( pathUtf8 ) )
+        {
+            // Synchronous by design: this is only used for the small control documents
+            // (tileset.json, .subtree) that have to be parsed before anything can be
+            // scheduled. Payloads go through the concurrent loader instead. A blocking
+            // HTTPClient is the right tool - there is nothing to render while waiting.
+            //
+            // connect_to_host wants a host and a port, not a URL, so the URL is split first.
+            // Doing the split in the kernel keeps it unit testable and keeps the "does this
+            // URL have an authority" rule next to the rest of the URL logic.
+            const core::UrlParts parts = core::splitUrl( pathUtf8 );
+            if ( !parts.valid )
+            {
+                out_error = godot::vformat( "not a usable url: '%s'", path );
+                return false;
+            }
+
+            // Ref<T>, not a stack object: HTTPClient derives from RefCounted, and a
+            // stack-constructed Godot object dies with "Godot Object created without binding
+            // callbacks" because the engine's construction hook never runs for it.
+            godot::Ref<godot::HTTPClient> client;
+            client.instantiate();
+
+            const godot::Error connectError =
+                client->connect_to_host( String( parts.host.c_str() ), parts.port );
+            if ( connectError != godot::OK )
+            {
+                out_error = godot::vformat( "cannot connect to '%s' (error %d)", path,
+                                            static_cast<int>( connectError ) );
+                return false;
+            }
+
+            while ( client->get_status() == godot::HTTPClient::STATUS_RESOLVING ||
+                    client->get_status() == godot::HTTPClient::STATUS_CONNECTING )
+            {
+                client->poll();
+            }
+
+            if ( client->get_status() != godot::HTTPClient::STATUS_CONNECTED )
+            {
+                out_error = godot::vformat( "cannot connect to '%s' (status %d)", path,
+                                            static_cast<int>( client->get_status() ) );
+                return false;
+            }
+
+            const std::string requestPath = parts.path;
+
+            // Keep the query string out of the request path: HTTPClient's request() takes the
+            // path relative to the host, and the authority was already consumed above.
+            godot::String requestPathGodot = String( requestPath.c_str() );
+            if ( !parts.scheme.empty() && parts.scheme != "http" && parts.scheme != "https" )
+            {
+                out_error =
+                    godot::vformat( "unsupported scheme '%s'", String( parts.scheme.c_str() ) );
+                return false;
+            }
+
+            const godot::Error requestError =
+                client->request( godot::HTTPClient::METHOD_GET, requestPathGodot,
+                                 godot::PackedStringArray() );
+            if ( requestError != godot::OK )
+            {
+                out_error = godot::vformat( "cannot request '%s' (error %d)", path,
+                                            static_cast<int>( requestError ) );
+                return false;
+            }
+
+            // Accumulate the body across chunks; a tileset.json is small but the client hands
+            // it back in pieces regardless.
+            godot::PackedByteArray body;
+            bool gotBody = false;
+
+            while ( client->get_status() == godot::HTTPClient::STATUS_REQUESTING ||
+                    client->get_status() == godot::HTTPClient::STATUS_BODY )
+            {
+                client->poll();
+
+                if ( !client->has_response() )
+                {
+                    continue;
+                }
+
+                const int responseCode = client->get_response_code();
+                if ( responseCode < 200 || responseCode >= 300 )
+                {
+                    out_error = godot::vformat( "HTTP %d for '%s'", responseCode, path );
+                    return false;
+                }
+
+                godot::PackedByteArray chunk = client->read_response_body_chunk();
+                if ( chunk.size() > 0 )
+                {
+                    body.append_array( chunk );
+                    gotBody = true;
+                }
+            }
+
+            if ( !gotBody || body.size() == 0 )
+            {
+                out_error = godot::vformat( "empty response body for '%s'", path );
+                return false;
+            }
+
+            out_bytes = body;
+            return true;
+        }
+
+        const Ref<FileAccess> file = FileAccess::open( path, FileAccess::READ );
         if ( file.is_null() )
         {
-            return PackedByteArray();
+            out_error = godot::vformat( "cannot open '%s' (error %d)", path,
+                                        static_cast<int>( FileAccess::get_open_error() ) );
+            return false;
         }
 
-        const PackedByteArray bytes =
-            file->get_buffer( static_cast<std::int64_t>( file->get_length() ) );
+        out_bytes = file->get_buffer( file->get_length() );
         file->close();
-        return bytes;
+        return true;
     }
 
     // ---------------------------------------------------------------------------
@@ -1493,6 +1674,24 @@ namespace tiles3d
         // into it rather than the tiles into world space.
         view.position = fromGodotVector( to_local( camera->get_global_transform().origin ) );
         view.fovDegrees = static_cast<double>( camera->get_fov() );
+
+        // Forward vector, also brought into local space. Only the direction matters, so the
+        // translation part of the transform is irrelevant here.
+        //
+        // `to_local` takes a point in this node's *parent* space, so a world-space point has
+        // to be pushed through to_global-style arithmetic: add the offset to the already
+        // local-space camera position and map the result back, then subtract. Doing it with
+        // Vector3 rather than the kernel Vec3 keeps the two to_local calls in the same space.
+        const godot::Vector3 forwardGlobal = -camera->get_global_transform().basis.get_column( 2 );
+        const godot::Vector3 cameraLocal = to_local( camera->get_global_transform().origin );
+        const godot::Vector3 forwardLocal =
+            to_local( camera->get_global_transform().origin + forwardGlobal ) - cameraLocal;
+
+        if ( forwardLocal.length_squared() > 0.0f )
+        {
+            view.forward = fromGodotVector( forwardLocal.normalized() );
+        }
+
         return view;
     }
 
@@ -1515,6 +1714,10 @@ namespace tiles3d
         const ViewState view = current_view();
         if ( view.viewportHeight <= 0.0 )
         {
+            // No camera to rank against, so nothing may be requested, and whatever is already
+            // in flight is for a view that no longer exists.
+            cancel_stale_loads();
+            load_queue.clear();
             return;
         }
 
@@ -1528,7 +1731,11 @@ namespace tiles3d
         traverse_tile( *root, compute_model_matrix(), view,
                        std::numeric_limits<double>::infinity() );
 
-        process_load_queue();
+        // The traversal has refreshed every priority this frame, so this is the point where
+        // the ranking is meaningful. Loading itself happens on worker threads and over HTTP;
+        // the two calls below only hand work over and take results back.
+        dispatch_loads();
+        adopt_completed_loads();
         sync_content_visibility();
 
         last_rendered_count = render_list.size();
@@ -1554,7 +1761,7 @@ namespace tiles3d
 
                 UtilityFunctions::print( godot::vformat(
                     "[Tileset3D] LOD f=%d cam=(%s,%s,%s) vpH=%s fov=%s rootSSE=%s maxSSE=%s "
-                    "render=%d loaded=%d",
+                    "render=%d loaded=%d inFlight=%d bytes=%s",
                     static_cast<int>( frame_number ),
                     godot::String::num( view.position.x, 1 ),
                     godot::String::num( view.position.y, 1 ),
@@ -1564,7 +1771,9 @@ namespace tiles3d
                     godot::String::num( root->screenSpaceError, 2 ),
                     godot::String::num( maximum_screen_space_error, 1 ),
                     static_cast<int>( render_list.size() ),
-                    static_cast<int>( loaded_tiles.size() ) ) );
+                    static_cast<int>( loaded_tiles.size() ),
+                    loader != nullptr ? loader->get_active_count() : 0,
+                    godot::String::num_int64( static_cast<std::int64_t>( loaded_bytes ) ) ) );
             }
         }
     }
@@ -1642,7 +1851,26 @@ namespace tiles3d
             {
                 tile.visible = true;
                 render_list.push_back( &tile );
-                request_content( tile );
+
+                // Load priority, in the same order the reference scheduler ranks by: how
+                // central the tile is to the view first, then how close it is. The foveated
+                // factor is Cesium's simplified `_foveatedFactor` - 0 dead-centre, 1 at the
+                // screen edge - and it matters more than distance because a tile behind the
+                // camera is both far and useless.
+                LoadPriority priority;
+                priority.distance = surfaceDistance;
+                priority.depth = tile.depth;
+
+                const math::Vec3 toTile = worldCenter - view.position;
+                const double toTileLength = glm::length( toTile );
+                if ( toTileLength > 0.0 )
+                {
+                    const double alignment =
+                        glm::dot( toTile / toTileLength, view.forward );
+                    priority.foveated = 1.0 - std::abs( alignment );
+                }
+
+                request_content( tile, priority );
             }
         };
 
@@ -1704,7 +1932,7 @@ namespace tiles3d
         }
     }
 
-    void Tileset3D::request_content( core::Tile &tile )
+    void Tileset3D::request_content( core::Tile &tile, const LoadPriority &priority )
     {
         if ( tile.contentState != core::ContentState::Unloaded || tile.isExternalTileset ||
              !tile.content.has_value() )
@@ -1712,79 +1940,215 @@ namespace tiles3d
             return;
         }
 
-        // Marked Loading right away so the same tile cannot be queued twice in one frame.
+        // Marked Loading right away so the same tile cannot be queued twice in one frame. The
+        // loader tracking is separate: this queue is rebuilt every frame from the traversal,
+        // whereas the loader holds the requests that are genuinely in flight.
         tile.contentState = core::ContentState::Loading;
-        load_queue.push_back( &tile );
+        load_queue.push_back( QueuedLoad{ &tile, priority } );
     }
 
-    void Tileset3D::process_load_queue()
+    void Tileset3D::dispatch_loads()
     {
-        int started = 0;
-
-        for ( core::Tile *tile : load_queue )
+        if ( loader == nullptr || load_queue.empty() )
         {
-            if ( started >= maximum_simultaneous_loads )
+            return;
+        }
+
+        // Rank by what the camera is actually looking at. This matters because the queue can
+        // hold far more entries than the concurrency budget allows: on a dense dataset it
+        // reaches well over a thousand, and a FIFO would spend its bandwidth on tiles the
+        // camera has already flown past, so the visible centre of the screen would arrive
+        // last. Sorting here - after the traversal refreshed every priority this frame - is
+        // what keeps the comparison from going stale.
+        std::sort( load_queue.begin(), load_queue.end(),
+                   []( const QueuedLoad &a, const QueuedLoad &b )
+                   { return isHigherLoadPriority( a.priority, b.priority ); } );
+
+
+        const int budget = maximum_simultaneous_loads;
+
+        // Snapshot before the loop: entries that do not fit the budget are handed back to
+        // Unloaded, and those must not be recorded as requested.
+        std::vector<core::Tile *> requested;
+        requested.reserve( load_queue.size() );
+
+        // Anything the loader is already fetching is wanted by definition - the traversal no
+        // longer queues it because it is in the Loading state, not because it lost interest.
+        // It has to be recorded before the loop and before the budget check, otherwise the
+        // cancel pass below would tear down a perfectly good in-flight request every frame.
+        for ( core::Tile *tile : requested_last_frame )
+        {
+            if ( loader->has_request( tile ) )
             {
-                // Hand it back so a later frame picks it up again.
-                tile->contentState = core::ContentState::Unloaded;
+                requested.push_back( tile );
+            }
+        }
+
+        for ( const QueuedLoad &queued : load_queue )
+        {
+            if ( loader->has_request( queued.tile ) )
+            {
+                // Already in flight; recorded by the pass above.
                 continue;
             }
 
-            ++started;
-
-            const PackedByteArray bytes = read_tile_payload( *tile );
-
-            bool ok = bytes.size() > 0;
-            String failure;
-
-            if ( ok )
+            if ( static_cast<int>( loader->get_active_count() ) >= budget )
             {
-                const math::Mat4 world = tile->worldMatrix.value_or( math::identity() );
-                const ContentNode created =
-                    createContentNode( bytes, base_directory, world, model_up_axis_ );
+                // Out of budget. Hand the leftover tiles back so a later frame re-queues them
+                // instead of leaving them stuck in Loading forever.
+                queued.tile->contentState = core::ContentState::Unloaded;
+                continue;
+            }
 
-                if ( created )
+            const String path = content_path( *queued.tile );
+            if ( path.is_empty() )
+            {
+                queued.tile->contentState = core::ContentState::Failed;
+                continue;
+            }
+
+            if ( loader->request( queued.tile, path, model_up_axis_ ) )
+            {
+                requested.push_back( queued.tile );
+            }
+            else
+            {
+                // Saturated or already requested; retry next frame.
+                queued.tile->contentState = core::ContentState::Unloaded;
+            }
+        }
+
+
+        // Everything asked for this frame is live; anything left over from last frame that is
+        // absent here is a tile the traversal no longer wants and gets cancelled.
+        for ( core::Tile *tile : requested_last_frame )
+        {
+            if ( std::find( requested.begin(), requested.end(), tile ) == requested.end() )
+            {
+                loader->cancel( tile );
+            }
+        }
+
+        requested_last_frame = std::move( requested );
+    }
+
+    void Tileset3D::cancel_stale_loads()
+    {
+        if ( loader == nullptr || requested_last_frame.empty() )
+        {
+            return;
+        }
+
+        // Called when this frame produced no render list (camera hidden, tileset hidden), so
+        // every in-flight fetch is by definition not for anything about to be drawn.
+        for ( core::Tile *tile : requested_last_frame )
+        {
+            loader->cancel( tile );
+        }
+
+        requested_last_frame.clear();
+    }
+
+    void Tileset3D::adopt_completed_loads()
+    {
+        if ( loader == nullptr )
+        {
+            return;
+        }
+
+        std::vector<CompletedLoad> finished = loader->collect_completed();
+
+        // Work left over from an earlier frame's budget goes first: it is strictly older than
+        // anything that just arrived, and its decode has already been paid for.
+        if ( !deferred_loads.empty() )
+        {
+            finished.insert( finished.begin(),
+                             std::make_move_iterator( deferred_loads.begin() ),
+                             std::make_move_iterator( deferred_loads.end() ) );
+            deferred_loads.clear();
+        }
+
+        if ( finished.empty() )
+        {
+            return;
+        }
+
+        // The loader already did the expensive half on a worker thread; all that is left here
+        // is instantiating nodes, which cannot be moved off the main thread. Bounded per frame
+        // so a burst of arrivals cannot spike the frame time - the rest waits for the next
+        // frame, and the loader keeps fetching behind it.
+        int uploaded = 0;
+
+        for ( CompletedLoad &load : finished )
+        {
+            core::Tile &tile = *load.tile;
+
+            if ( load.generation != loader_generation )
+            {
+                // From a previous load() call; the tree it referred to is gone.
+                continue;
+            }
+
+            if ( load.state != LoadState::Ready || load.prepared == nullptr )
+            {
+                tile.loadErrorCount += 1;
+
+                if ( tile.loadErrorCount >= 3 )
                 {
-                    // Hidden until sync decides, so a freshly attached tile does not flash
-                    // for one frame before its siblings arrive.
-                    created.node->set_visible( false );
-                    add_child( created.node );
-
-                    tile->contentUserData = created.node;
-                    tile->contentState = core::ContentState::Ready;
-                    tile->contentBytes = static_cast<std::size_t>( bytes.size() );
-                    loaded_tiles.push_back( tile );
+                    tile.contentState = core::ContentState::Failed;
+                    UtilityFunctions::printerr( "[Tileset3D] giving up on '", load.source,
+                                                "': ", load.error );
                 }
                 else
                 {
-                    ok = false;
-                    failure = String( created.error.c_str() );
+                    // Retry: a transient failure should not permanently blank a tile.
+                    tile.contentState = core::ContentState::Unloaded;
                 }
-            }
-            else
-            {
-                failure = "unreadable";
-            }
-
-            if ( ok )
-            {
                 continue;
             }
 
-            // Retry a couple of times before giving up, so a transient problem does not
-            // permanently blank a tile.
-            tile->loadErrorCount += 1;
+            if ( uploaded >= maximum_uploads_per_frame )
+            {
+                // Out of this frame's budget. Rather than throwing the work away, park it in
+                // the loader's own completion list and pick it up next frame - the decode is
+                // already paid for, so discarding it would pay for it twice.
+                tile.contentState = core::ContentState::Loading;
+                deferred_loads.push_back( std::move( load ) );
+                continue;
+            }
 
-            if ( tile->loadErrorCount >= 3 )
+            ++uploaded;
+
+            const math::Mat4 world = tile.worldMatrix.value_or( math::identity() );
+            const ContentNode created = assembleContentNode( *load.prepared, world );
+
+            if ( !created )
             {
-                tile->contentState = core::ContentState::Failed;
-                UtilityFunctions::printerr( "[Tileset3D] giving up on '", content_path( *tile ), "': ",
-                                            failure );
+                tile.loadErrorCount += 1;
+
+                if ( tile.loadErrorCount >= 3 )
+                {
+                    tile.contentState = core::ContentState::Failed;
+                    UtilityFunctions::printerr( "[Tileset3D] giving up on '", load.source,
+                                                "': ", String( created.error.c_str() ) );
+                }
+                else
+                {
+                    tile.contentState = core::ContentState::Unloaded;
+                }
+                continue;
             }
-            else
-            {
-                tile->contentState = core::ContentState::Unloaded;
-            }
+
+            // Hidden until sync decides, so a freshly attached tile does not flash for one
+            // frame before its siblings arrive.
+            created.node->set_visible( false );
+            add_child( created.node );
+
+            tile.contentUserData = created.node;
+            tile.contentState = core::ContentState::Ready;
+            tile.contentBytes = load.byteCount;
+            loaded_tiles.push_back( &tile );
+            loaded_bytes += load.byteCount;
         }
     }
 

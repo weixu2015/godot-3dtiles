@@ -37,7 +37,6 @@ demo/addons/godot-3dtiles.gdextension.uid
 demo/audit_shots/
 demo/http_shots/
 demo/globe_shots/
-
 # Globe capture output. GLOBE_OUT redirects the audit to a named file, and the bisecting
 # loop that found the ellipsoid z-fight left a dozen of these behind. `globe_preview.png`
 # is the exception worth keeping - it is the one image you actually compare against the

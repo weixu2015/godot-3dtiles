@@ -448,12 +448,15 @@ namespace tiles3d
         }
 
         /// Depth-first walk of the glTF node graph, accumulating transforms in double and
-        /// flattening every mesh into one MeshInstance3D under `parent` (its transform
-        /// carries the accumulated world matrix, so node hierarchy depth costs nothing).
-        void buildNodes( const core::GltfModel &model, const std::int32_t nodeIndex,
-                         const math::Mat4 &parentTransform, Node3D &parent,
-                         std::vector<Ref<StandardMaterial3D>> &materialCache,
-                         int &meshInstanceCount, std::string &error )
+        /// flattening every mesh node into one ArrayMesh (its transform carries the
+        /// accumulated matrix, so node hierarchy depth costs nothing at render time).
+        ///
+        /// Produces only resources - no scene nodes. This is the worker-thread half, matching
+        /// what cesium-native calls prepareInLoadThread: the mesh data is built here, and the
+        /// main thread does nothing but instantiate MeshInstance3D around it.
+        void buildPreparedNodes( const core::GltfModel &model, const std::int32_t nodeIndex,
+                                 const math::Mat4 &parentTransform, PreparedContent &out,
+                                 std::vector<std::int32_t> &materialSlotByIndex )
         {
             if ( nodeIndex < 0 || static_cast<std::size_t>( nodeIndex ) >= model.nodes.size() )
             {
@@ -493,32 +496,8 @@ namespace tiles3d
                             &model.materials[static_cast<std::size_t>( primitive.material )];
                     }
 
-                    // Diagnostic. Whether shading can even show a lighting error depends on
-                    // these flags: an unlit primitive ignores normals completely (unshaded
-                    // shading, and buildSurfaceArrays skips generating them), so "convex
-                    // geometry looks concave" cannot be a normal problem there - it points
-                    // at winding / backface culling instead.
-                    {
-                        static int reportedPrimitives = 0;
-                        if ( reportedPrimitives < 3 )
-                        {
-                            ++reportedPrimitives;
-                            godot::UtilityFunctions::print( godot::vformat(
-                                "[Tileset3D] prim: verts=%d indices=%d hasNormal=%d unlit=%d "
-                                "doubleSided=%d alphaMode=%d",
-                                static_cast<int>( primitive.positions.size() / 3u ),
-                                static_cast<int>( primitive.indices.size() ),
-                                primitive.normals.empty() ? 0 : 1,
-                                material != nullptr && material->unlit ? 1 : 0,
-                                material != nullptr && material->doubleSided ? 1 : 0,
-                                material != nullptr
-                                    ? static_cast<int>( material->alphaMode )
-                                    : -1 ) );
-                        }
-                    }
-
                     godot::Array arrays;
-                    if ( !buildSurfaceArrays( primitive, material, arrays, error ) )
+                    if ( !buildSurfaceArrays( primitive, material, arrays, out.error ) )
                     {
                         continue;
                     }
@@ -526,70 +505,58 @@ namespace tiles3d
                     arrayMesh->add_surface_from_arrays( Mesh::PRIMITIVE_TRIANGLES, arrays );
                     surfaceMaterials.push_back( primitive.material );
 
-                    // Build the material now (shared across primitives via the cache);
-                    // attachment happens after all surfaces exist.
+                    // Build the material now, shared across primitives that reference it.
                     if ( primitive.material >= 0 )
                     {
                         const std::size_t materialSlot =
                             static_cast<std::size_t>( primitive.material );
-                        if ( materialSlot >= materialCache.size() )
+                        if ( materialSlot >= materialSlotByIndex.size() )
                         {
-                            materialCache.resize( materialSlot + 1u );
+                            materialSlotByIndex.resize( materialSlot + 1u, -1 );
                         }
-                        if ( materialCache[materialSlot].is_null() )
-                        {
-                            materialCache[materialSlot] =
-                                buildMaterial( model, primitive.material, error );
-                        }
-                    }
 
-                    ++meshInstanceCount;
+                        if ( materialSlotByIndex[materialSlot] < 0 )
+                        {
+                            Ref<StandardMaterial3D> built =
+                                buildMaterial( model, primitive.material, out.error );
+
+                            materialSlotByIndex[materialSlot] =
+                                static_cast<std::int32_t>( out.materials.size() );
+                            out.materials.push_back( built );
+                        }
+
+                        surfaceMaterials.back() = materialSlotByIndex[materialSlot];
+                    }
                 }
 
                 if ( arrayMesh->get_surface_count() > 0 )
                 {
-                    MeshInstance3D *meshInstance = memnew( MeshInstance3D );
-                    meshInstance->set_transform( toGodotTransform( worldTransform ) );
-                    meshInstance->set_mesh( arrayMesh );
+                    // One Primitive per mesh node. Multi-surface meshes keep their per-surface
+                    // material through `surfaceMaterials`, which is why the primitive carries
+                    // a list rather than a single index.
+                    PreparedPrimitive prepared;
+                    prepared.mesh = arrayMesh;
+                    prepared.surfaceMaterials = surfaceMaterials;
+                    out.primitives.push_back( std::move( prepared ) );
 
-                    // Per-surface materials, not material_override: multiple primitives
-                    // may share one MeshInstance3D with different materials.
-                    for ( std::size_t surface = 0;
-                          surface < surfaceMaterials.size() &&
-                          surface < static_cast<std::size_t>( arrayMesh->get_surface_count() );
-                          ++surface )
-                    {
-                        const std::int32_t materialIndex = surfaceMaterials[surface];
-                        if ( materialIndex >= 0 &&
-                             static_cast<std::size_t>( materialIndex ) < materialCache.size() )
-                        {
-                            meshInstance->set_surface_override_material(
-                                static_cast<std::int32_t>( surface ),
-                                materialCache[static_cast<std::size_t>( materialIndex )] );
-                        }
-                    }
-
-                    parent.add_child( meshInstance );
+                    PreparedMeshNode meshNode;
+                    meshNode.transform = worldTransform;
+                    meshNode.primitive = static_cast<std::int32_t>( out.primitives.size() - 1u );
+                    out.nodes.push_back( meshNode );
                 }
             }
 
             for ( const std::int32_t child : node.children )
             {
-                buildNodes( model, child, worldTransform, parent, materialCache,
-                            meshInstanceCount, error );
+                buildPreparedNodes( model, child, worldTransform, out, materialSlotByIndex );
             }
         }
 
     } // namespace
 
-    ContentNode createContentNode( const PackedByteArray &bytes, const String &basePath,
-                                   const math::Mat4 &worldMatrix, core::ModelUpAxis upAxis )
+    DecodedTileContent decodeTileContent( const PackedByteArray &bytes )
     {
-        // External resources are not resolved (embedded images only), so the base path is
-        // no longer needed; the parameter stays for API stability.
-        (void)basePath;
-
-        ContentNode result;
+        DecodedTileContent result;
 
         if ( bytes.size() == 0 )
         {
@@ -598,7 +565,6 @@ namespace tiles3d
         }
 
         std::vector<std::byte> glb;
-        std::optional<math::Vec3> rtcCenter;
 
         if ( startsWith( bytes, "b3dm", 4 ) )
         {
@@ -615,7 +581,7 @@ namespace tiles3d
             const auto *glbBegin =
                 reinterpret_cast<const std::byte *>( bytes.ptr() ) + parsed.glbOffset;
             glb.assign( glbBegin, glbBegin + parsed.glbLength );
-            rtcCenter = parsed.rtcCenter;
+            result.rtcCenter = parsed.rtcCenter;
         }
         else if ( startsWith( bytes, "glTF", 4 ) )
         {
@@ -628,11 +594,30 @@ namespace tiles3d
             return result;
         }
 
-        core::GltfModel model;
-        if ( !core::parseGltfModel( glb, model, result.error ) )
+        // The heavy half: Draco decompression and KTX2 transcoding both run inside here, and
+        // both are pure kernel code with no engine types involved. This is the part worth
+        // moving off the main thread.
+        if ( !core::parseGltfModel( glb, result.model, result.error ) )
         {
+            result.model = core::GltfModel{};
+        }
+
+        return result;
+    }
+
+    PreparedContent prepareContentResources( const DecodedTileContent &decoded,
+                                             core::ModelUpAxis upAxis )
+    {
+        PreparedContent result;
+
+        if ( !decoded.error.empty() )
+        {
+            result.error = decoded.error;
             return result;
         }
+
+        const core::GltfModel &model = decoded.model;
+        const std::optional<math::Vec3> &rtcCenter = decoded.rtcCenter;
 
         // Content root: the up-axis correction, followed by RTC_CENTER as its origin
         // (RTC_CENTER is expressed in the tile's coordinate system, so it composes after
@@ -679,40 +664,70 @@ namespace tiles3d
             rootTransform[3] = glm::dvec4( 0.0, 0.0, 0.0, 1.0 );
         }
 
-        Node3D *gltfRoot = memnew( Node3D );
-        gltfRoot->set_name( "Content" );
-        gltfRoot->set_transform( toGodotTransform( rootTransform ) );
+        result.rootTransform = rootTransform;
 
-        std::vector<Ref<StandardMaterial3D>> materialCache;
-        int meshInstanceCount = 0;
-
+        std::vector<std::int32_t> materialSlotByIndex;
         for ( const std::int32_t root : model.sceneNodes )
         {
-            buildNodes( model, root, math::identity(), *gltfRoot, materialCache,
-                        meshInstanceCount, result.error );
+            buildPreparedNodes( model, root, math::identity(), result, materialSlotByIndex );
         }
 
-        if ( meshInstanceCount == 0 )
+        if ( result.nodes.empty() )
         {
-            gltfRoot->queue_free();
             if ( result.error.empty() )
             {
                 result.error = "glTF content produced no drawable geometry";
             }
+        }
+
+        return result;
+    }
+
+    ContentNode assembleContentNode( const PreparedContent &prepared,
+                                     const math::Mat4 &worldMatrix )
+    {
+        ContentNode result;
+
+        if ( !prepared.error.empty() )
+        {
+            result.error = prepared.error;
             return result;
         }
 
-        // Report only the first few tiles: this tileset has 373 b3dm payloads and the
-        // diagnostic would otherwise flood the output panel.
+        Node3D *gltfRoot = memnew( Node3D );
+        gltfRoot->set_name( "Content" );
+        gltfRoot->set_transform( toGodotTransform( prepared.rootTransform ) );
+
+        for ( const PreparedMeshNode &meshNode : prepared.nodes )
         {
-            static int reported = 0;
-            if ( reported < 3 )
+            if ( meshNode.primitive < 0 ||
+                 static_cast<std::size_t>( meshNode.primitive ) >= prepared.primitives.size() )
             {
-                UtilityFunctions::print( godot::vformat(
-                    "[Tileset3D] content #%d: glb %d bytes, meshInstances=%d", reported,
-                    static_cast<int>( bytes.size() ), meshInstanceCount ) );
-                ++reported;
+                continue;
             }
+
+            const PreparedPrimitive &primitive =
+                prepared.primitives[static_cast<std::size_t>( meshNode.primitive )];
+
+            auto *meshInstance = memnew( MeshInstance3D );
+            meshInstance->set_transform( toGodotTransform( meshNode.transform ) );
+            meshInstance->set_mesh( primitive.mesh );
+
+            // Per-surface materials, not material_override: one mesh may carry primitives
+            // that use different materials.
+            for ( std::size_t surface = 0; surface < primitive.surfaceMaterials.size(); ++surface )
+            {
+                const std::int32_t materialIndex = primitive.surfaceMaterials[surface];
+                if ( materialIndex >= 0 &&
+                     static_cast<std::size_t>( materialIndex ) < prepared.materials.size() )
+                {
+                    meshInstance->set_surface_override_material(
+                        static_cast<std::int32_t>( surface ),
+                        prepared.materials[static_cast<std::size_t>( materialIndex )] );
+                }
+            }
+
+            gltfRoot->add_child( meshInstance );
         }
 
         Node3D *wrapper = memnew( Node3D );
@@ -723,6 +738,17 @@ namespace tiles3d
         result.node = wrapper;
         result.gltfRoot = gltfRoot;
         return result;
+    }
+
+    ContentNode createContentNode( const PackedByteArray &bytes, const math::Mat4 &worldMatrix,
+                                   core::ModelUpAxis upAxis )
+    {
+        // Single-call entry point for callers with the bytes in hand and no reason to split
+        // the stages. The concurrent loader calls the halves separately so the expensive part
+        // runs on a worker thread.
+        const DecodedTileContent decoded = decodeTileContent( bytes );
+        const PreparedContent prepared = prepareContentResources( decoded, upAxis );
+        return assembleContentNode( prepared, worldMatrix );
     }
 
 } // namespace tiles3d

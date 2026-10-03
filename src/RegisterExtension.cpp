@@ -14,6 +14,7 @@
 #include "Godot3DTiles.h"
 #include "OriginAuthority.h"
 #include "Tileset3D.h"
+#include "TilesetContentLoader.h"
 
 /// @file
 /// Register our classes with Godot.
@@ -43,6 +44,7 @@ namespace
         // draws its bounding volumes as wireframes; content rendering arrives with phases 3
         // and 4 of docs/REFACTOR_PLAN.md.
         godot::ClassDB::register_class<Georeference3D>();
+        godot::ClassDB::register_class<TilesetContentLoader>();
         godot::ClassDB::register_class<Tileset3D>();
 
         // The virtual Earth. Globe3D resolves the georeference the same way Tileset3D does,

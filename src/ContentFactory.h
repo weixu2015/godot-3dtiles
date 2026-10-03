@@ -8,14 +8,19 @@
 #ifndef CONTENT_FACTORY_H
 #define CONTENT_FACTORY_H
 
+#include "core/content/GltfReader.h"
 #include "core/math/Mat4.h"
 #include "core/tiles/TilesetJson.h"
 
+#include "godot_cpp/classes/mesh.hpp"
+#include "godot_cpp/classes/material.hpp"
 #include "godot_cpp/classes/node3d.hpp"
 #include "godot_cpp/variant/packed_byte_array.hpp"
 #include "godot_cpp/variant/string.hpp"
 
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace tiles3d
 {
@@ -39,19 +44,91 @@ namespace tiles3d
         }
     };
 
-    /// Detects the container (b3dm or binary glTF), parses it with the kernel's
-    /// GltfReader, and assembles the node tree by hand: one ArrayMesh surface per glTF
-    /// primitive, one shared StandardMaterial3D per glTF material, textures decoded from
-    /// the embedded image bytes.
+    /// Result of the engine-free half of content assembly.
     ///
-    /// This is deliberately NOT Godot's GLTFDocument: the importer generates
-    /// ImporterMeshInstance3D placeholders that it only converts to MeshInstance3D
-    /// outside the editor (modules/gltf/register_types.cpp gates the conversion
-    /// extension on !is_editor_hint()), drags tiles through the editor image import
-    /// pipeline, and re-serializes what the GltfReader already decoded. Hand assembly
-    /// behaves identically in editor and at runtime.
+    /// This split exists so the expensive work - unwrapping the container, running Draco and
+    /// KTX2 over the mesh - can happen on a worker thread, while the part that must touch the
+    /// scene tree stays on the main thread. `GltfModel` holds only std::vector / std::span /
+    /// plain structs, so it is safe to build in parallel and hand across the boundary.
+    struct DecodedTileContent
+    {
+        core::GltfModel model;
+
+        /// RTC_CENTER as declared by the b3dm container, in the tile's coordinate system.
+        std::optional<math::Vec3> rtcCenter;
+
+        /// Empty on success.
+        std::string error;
+    };
+
+    /// Unwraps a b3dm or binary glTF payload and decodes it fully - including Draco vertex
+    /// decompression and KTX2 transcoding - without touching any Godot type.
     ///
-    /// MUST run on the main thread: it creates Resource and Node instances.
+    /// SAFE TO CALL FROM A WORKER THREAD.
+    DecodedTileContent decodeTileContent( const godot::PackedByteArray &bytes );
+
+    /// One glTF mesh node: where it sits and which prepared primitive it draws.
+    ///
+    /// Mirrors the two-stage split in cesium-native's IPrepareRendererResources, where the
+    /// load thread produces meshes and the main thread only instantiates scene nodes. Godot's
+    /// ArrayMesh / StandardMaterial3D / ImageTexture are RefCounted resources that are not in
+    /// the scene tree, so building them off-thread is safe - which is exactly what the
+    /// cesium-native-era Godot backend did in its own prepareInLoadThread.
+    struct PreparedMeshNode
+    {
+        /// Local transform relative to the content root, up-axis correction already applied.
+        math::Mat4 transform = math::identity();
+
+        /// Index into `PreparedContent::primitives`.
+        std::int32_t primitive = -1;
+    };
+
+    /// One mesh's geometry and the materials its surfaces use.
+    struct PreparedPrimitive
+    {
+        godot::Ref<godot::Mesh> mesh;
+
+        /// Material index per surface, indexing `PreparedContent::materials`. -1 for none.
+        std::vector<std::int32_t> surfaceMaterials;
+    };
+
+    /// Everything the main thread needs to instantiate a tile's content, produced entirely on
+    /// a worker thread.
+    struct PreparedContent
+    {
+        /// Content root transform: the up-axis correction with RTC_CENTER as its origin.
+        math::Mat4 rootTransform = math::identity();
+
+        /// Node tree of the glTF scene, flattened into draw calls with their transforms.
+        std::vector<PreparedMeshNode> nodes;
+
+        /// Meshes, in the order `nodes` refers to them through PreparedMeshNode.
+        std::vector<PreparedPrimitive> primitives;
+
+        /// Shared materials, one per glTF material actually used.
+        std::vector<godot::Ref<godot::Material>> materials;
+
+        /// Empty on success.
+        std::string error;
+    };
+
+    /// Turns a decoded payload into Godot *resources* (meshes, materials, textures) without
+    /// creating a single scene node.
+    ///
+    /// SAFE TO CALL FROM A WORKER THREAD. The returned refs are owned by the caller until it
+    /// hands them to the main thread, and none of them are in the scene tree.
+    PreparedContent prepareContentResources( const DecodedTileContent &decoded,
+                                             core::ModelUpAxis upAxis );
+
+    /// Instantiates the scene nodes for prepared content and places the result in the render
+    /// frame.
+    ///
+    /// MUST run on the main thread: it creates Node instances and parents them.
+    ContentNode assembleContentNode( const PreparedContent &prepared,
+                                     const math::Mat4 &worldMatrix );
+
+    /// Convenience: decode + prepare + assemble in one call, for callers that have the bytes
+    /// in hand and no reason to split the stages. Equivalent to calling the three in order.
     ///
     /// Transform layout of the result:
     ///   wrapper.transform  = worldMatrix
@@ -73,14 +150,9 @@ namespace tiles3d
     /// tile-frame coordinates - far from that origin - is displaced when it *is* rotated.
     /// That is precisely why the declared axis has to be honoured: a Z-up dataset must skip
     /// the correction entirely rather than have the displacement patched up afterwards.
-    ///
-    /// @param bytes raw payload.
-    /// @param basePath unused (embedded images only); kept for API stability.
-    /// @param worldMatrix the tile's accumulated world matrix.
-    /// @param upAxis the tileset's declared content up axis.
     ContentNode createContentNode( const godot::PackedByteArray &bytes,
-                                  const godot::String &basePath, const math::Mat4 &worldMatrix,
-                                  core::ModelUpAxis upAxis = core::ModelUpAxis::Y );
+                                   const math::Mat4 &worldMatrix,
+                                   core::ModelUpAxis upAxis = core::ModelUpAxis::Y );
 
 } // namespace tiles3d
 
