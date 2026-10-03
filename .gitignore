@@ -38,5 +38,6 @@ demo/*.uid
 # demo/implicit_audit.gd). They are local verification artefacts - useful to look at,
 # not source. Regenerate with the scenes described in docs/ARCHITECTURE.md 5.4.
 demo/audit_shots/
+demo/http_shots/
 
 lib/

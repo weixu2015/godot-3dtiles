@@ -190,6 +190,52 @@ KTX2 必须在进入 Godot 之前转成 RGBA8（`core::decodeKtx2`），**不能
 - 只在细化停止时（或对正在细化的子节点）才发出内容请求 ——
   所以相机靠近时，**根瓦片的 payload 通常永远不会被请求**。
 
+### 4.4 资源准备：子线程取数 + 解码，主线程只做装配
+
+大场景卡顿的根因是**取数 + 解码和渲染挤在同一个主线程**。b3dm 要跑 Draco、
+KTX2 要转码，单块几毫秒；一帧八块就是肉眼可见的掉帧，冷启动更是几秒起步。
+这些工作**瓦片之间完全独立**，所以解法是搬走而不是省掉：
+
+| 阶段        | 在哪跑             | 内容                                                                  |
+| ----------- | ------------------ | --------------------------------------------------------------------- |
+| 1. fetch    | `WorkerThreadPool` | 本地 `FileAccess` 读盘 / 远端 `HTTPClient` 轮询收包                    |
+| 2. decode   | `WorkerThreadPool` | 解容器 + Draco + KTX2 转码（纯内核代码，无引擎类型）                  |
+| 3. assemble | **主线程**         | `ArrayMesh` / `StandardMaterial3D` / `ImageTexture` 创建与挂节点     |
+
+第 3 步必须回主线程（`Node` 实例化线程受限），但它已经是有界的廉价操作，所以
+**帧耗时不随数据集体量增长**。第 1、2 步合并成一个 `add_native_task`，由
+`TilesetContentLoader` 统管 —— 也就是 cesium-native `prepareInLoadThread` /
+`prepareInMainThread` 的同一刀。
+
+#### HTTP 用 `HTTPClient` 轮询，不用 `HTTPRequest` 节点
+
+这是本模块最重要的决策。重构前的 `GodotAssetAccessor`（`856344a^`）用的是
+**单个 `Ref<HTTPClient>` + 手动 `poll()` 循环**，实践证明它可靠；重构后一度改用
+`HTTPRequest` 节点，结果是一连串死锁：
+
+| 做法                                    | 后果                                                                     |
+| --------------------------------------- | ------------------------------------------------------------------------ |
+| `HTTPRequest::cancel_request()` 在 `_process` 里调 | 它会**阻塞等待协程退栈**，而协程退栈需要主线程轮回 —— 主线程自己卡死 |
+| 在信号自己的发射里 `disconnect`          | 主线程互斥量重入死锁                                                     |
+| 在 `CallableCustom::call()` 里 `memdelete` 自己 | 栈上还有该对象的方法帧 → 挂起                                            |
+| `CallableCustom::get_argument_count` 返回 `r_is_valid=false` | 不是"随便收"，Godot 会**静默丢掉连接**，`connect()` 还不报错 |
+
+`HTTPRequest` 是**信号驱动**的，完成由引擎自己的发射轮次派发；而调度器还要对同一批
+传输**取消、重排、限流**，等于和那一轮抢控制权。`HTTPClient` 只是被轮询，没有这些
+交互：活儿全在这个 worker 线程上干完，主线程只看到成品字节。
+
+并发度由 `max_concurrent_`（默认 20）限流，**在途即计入**，所以慢网络不会堆出无界
+积压。取消只置 `cancelled` 标志位 —— 运行中的 worker 停不下来，但它会自查标志后
+不发布结果；记录留到回收时才删，所以 worker 手里的指针始终有效。
+
+URL 解析走 `core::splitUrl`（`connect_to_host` 要的是 host+port，不是整条 URL），
+`localhost` 改写成 `127.0.0.1`（沿用旧 accessor 的做法：某些沙箱环境的解析器里没有
+回环主机名）。控制文档（`tileset.json` / `.subtree`）走 `Tileset3D` 里同款的
+`Ref<HTTPClient>` 轮询。
+
+> `FileAccess` **不支持 http**，打不开就是 `ERR_FILE_NOT_FOUND`(7) —— 这正是
+> "重构后 http 报错" 的根因。
+
 ---
 
 ## 5. 构建与测试

@@ -11,6 +11,7 @@
 #include "Godot3DTiles.h"
 #include "OriginAuthority.h"
 #include "Tileset3D.h"
+#include "TilesetContentLoader.h"
 
 /// @file
 /// Register our classes with Godot.
@@ -39,6 +40,7 @@ namespace
         // The georeference and the tileset node. See docs/ARCHITECTURE.md 2.2 for the node
         // model and the rules that connect them.
         godot::ClassDB::register_class<Georeference3D>();
+        godot::ClassDB::register_class<TilesetContentLoader>();
         godot::ClassDB::register_class<Tileset3D>();
     }
 

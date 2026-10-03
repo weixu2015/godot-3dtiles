@@ -42,6 +42,11 @@ const DATASETS := [
 ## enough for the scheduler to finish its requests at the framed camera pose; too short and a
 ## healthy dataset reports loaded=0 purely because it was still fetching.
 const WARMUP_FRAMES := 150
+
+# Bounded deadline. The warmup is a lower bound on how long to wait; this is the upper one.
+# If a worker never finishes, the "done" condition is never met and an unbounded audit just
+# parks in its window, which is a hang rather than a test result. See http_audit.gd.
+const MAX_FRAMES := 900
 const SHOT_DIR := "res://audit_shots"
 
 var _tileset: Tileset3D
@@ -160,12 +165,18 @@ func _process(_delta: float) -> void:
 	var loaded := _tileset.get_loaded_tile_count()
 	var error := _tileset.get_last_error()
 
+	# Same deadline as the http audit: a dataset that never settles must be reported, never
+	# waited on. Without this the process parks in its window until a human kills it.
+	var timed_out := _frames >= MAX_FRAMES and _tileset.get_in_flight_count() > 0
+
 	# A dataset counts as healthy when it parsed and actually scheduled something. A
 	# parsed-but-empty dataset (no content at the root, e.g. a proxy-only tree) is
 	# reported as WARN rather than FAIL so it does not mask real load failures.
 	var status := "OK"
 	if error != "":
 		status = "FAIL(load)"
+	elif timed_out:
+		status = "FAIL(timeout)"
 	elif loaded == 0:
 		status = "WARN(no-content)"
 

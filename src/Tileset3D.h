@@ -13,6 +13,7 @@
 #define TILESET_3D_H
 
 #include "Georeference3D.h"
+#include "TilesetContentLoader.h"
 
 #include "core/tiles/Tile.h"
 #include "core/tiles/TilesetJson.h"
@@ -37,15 +38,29 @@ namespace tiles3d
             math::Vec3 position{ 0.0 };
             double viewportHeight = 1080.0;
             double fovDegrees = 70.0;
+
+            /// Unit vector the camera looks along, in this node's space. Used to rank loads
+            /// by how central they are to the view - see LoadPriority.
+            math::Vec3 forward{ 0.0, 0.0, -1.0 };
         };
 
     private:
         godot::String url;
         double maximum_screen_space_error = 16.0;
 
-        /// Content loads started per frame. Loading is synchronous on the main thread here,
-        /// so this is the knob that keeps a cold start from stalling a single frame.
-        int maximum_simultaneous_loads = 8;
+        /// Cap on requests in flight at once - fetching AND decoding combined.
+        ///
+        /// With the loader running on worker threads this is a throughput knob rather than a
+        /// stall guard: the work no longer happens on the main thread, so raising it costs
+        /// memory and bandwidth instead of frame time. The reference scheduler uses 20.
+        int maximum_simultaneous_loads = 20;
+
+        /// How many decoded tiles may be turned into Godot resources and attached per frame.
+        ///
+        /// This is the actual stall guard now. Assembly has to run on the main thread, so
+        /// this bounds main-thread work per frame; the loader keeps filling the queue behind
+        /// it. Sized so a cold start ramps up quickly without dropping a frame.
+        int maximum_uploads_per_frame = 4;
 
         /// Draws the tile bounding volumes. On by default while there is no content
         /// rendering: it is the only thing that shows up in the editor.
@@ -105,11 +120,43 @@ namespace tiles3d
         // ---- traversal state, rebuilt every frame ----
 
         std::vector<core::Tile *> render_list;
-        std::vector<core::Tile *> load_queue;
+
+        /// Tiles the traversal wants loaded, with the priority they were ranked at. Sorted
+        /// before dispatch so the visible centre of the screen is fetched first - the queue
+        /// can hold well over a thousand entries on a dense dataset, and a FIFO would spend
+        /// its bandwidth on tiles the camera has already flown past.
+        struct QueuedLoad
+        {
+            core::Tile *tile = nullptr;
+            LoadPriority priority;
+        };
+
+        std::vector<QueuedLoad> load_queue;
+
+        /// Decoded, adoptable loads that did not fit last frame's upload budget. Moving them
+        /// here instead of re-requesting the tile keeps the decode from being paid for twice.
+        std::vector<CompletedLoad> deferred_loads;
+
+        /// Off-thread fetch + decode. Owned as a child node so it is torn down with this one.
+        TilesetContentLoader *loader = nullptr;
+
+        /// Tiles requested last frame, so the ones the camera has stopped looking at can be
+        /// cancelled. A load nobody can see is pure wasted bandwidth: the reference scheduler
+        /// aborts any request not touched for a full frame, and a fast fly-through otherwise
+        /// saturates the budget with tiles that are already behind the camera.
+        std::vector<core::Tile *> requested_last_frame;
 
         /// Tiles whose content node is currently attached, so visibility can be toggled
         /// without walking the whole tree.
         std::vector<core::Tile *> loaded_tiles;
+
+        /// Total bytes handed to the renderer so far, for the stats overlay.
+        std::size_t loaded_bytes = 0;
+
+        /// Bumped whenever the tile tree is thrown away. Loads still in flight carry the
+        /// generation they were started under and are dropped when it no longer matches, so
+        /// a reload never adopts content decoded from the previous dataset.
+        std::uint64_t loader_generation = 0;
 
         std::int64_t frame_number = 0;
         std::size_t last_rendered_count = 0;
@@ -162,12 +209,37 @@ namespace tiles3d
         void update_tiles();
         void traverse_tile( core::Tile &tile, const math::Mat4 &parent_world, const ViewState &view,
                             double nearest_conditional_ge );
-        void request_content( core::Tile &tile );
-        void process_load_queue();
+        void request_content( core::Tile &tile, const LoadPriority &priority );
+
+        /// Sorts the frame's requests by priority and hands what fits to the loader.
+        void dispatch_loads();
+
+        /// Cancels loads requested a frame ago that the traversal did not ask for again.
+        void cancel_stale_loads();
+
+        /// Adopts everything the loader finished: builds the Godot node on the main thread
+        /// and attaches it, up to `maximum_uploads_per_frame`.
+        void adopt_completed_loads();
+
         void sync_content_visibility();
 
+        /// Resolves a document URL (tileset.json, external tileset, subtree) against this
+        /// node's `url`, so the same code serves a local path and an http URL.
+        godot::String document_url( const godot::String &reference ) const;
+
         godot::String content_path( const core::Tile &tile ) const;
-        godot::PackedByteArray read_tile_payload( const core::Tile &tile ) const;
+
+        /// Reads a whole document into memory. Synchronous, and only used for the small
+        /// control files (tileset.json, .subtree) that have to be parsed before the tree
+        /// exists; payloads go through the loader.
+        bool read_document( const godot::String &path, godot::String &out_text,
+                            godot::String &out_error ) const;
+
+        /// The byte-level half of read_document, covering both a local path and an http(s)
+        /// URL. Kept separate because .subtree files are binary.
+        bool read_binary_document( const godot::String &path, godot::PackedByteArray &out_bytes,
+                                   godot::String &out_error ) const;
+
         void release_content( core::Tile &tile );
 
         /// Editor-only: flies the editor camera to frame the loaded dataset once.
@@ -237,6 +309,13 @@ namespace tiles3d
         /// rendering on the last traversal.
         std::size_t get_loaded_tile_count() const;
         std::size_t get_last_rendered_count() const;
+
+        /// Payload bytes handed to the renderer so far, and the number of fetches/decode jobs
+        /// currently in flight. Exposed for throughput diagnostics: a healthy concurrent
+        /// loader keeps in-flight near `maximum_simultaneous_loads` while it streams and
+        /// drains it as the view settles.
+        std::size_t get_loaded_bytes() const;
+        int get_in_flight_count() const;
 
         /// Prints the tile tree to the Godot console, `max_depth` levels deep.
         void dump_tree( int max_depth ) const;
