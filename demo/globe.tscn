@@ -48,7 +48,7 @@ rings = 64
 print_telemetry = true
 
 [node name="Tileset3D" type="Tileset3D" parent="Georeference3D" unique_id=628325770]
-url = "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json"
+url = "E:/GISData/3D Tiles/1.1/Photogrammetry/tileset.json"
 debug_show_bounding_volume = false
 
 [node name="GlobeCameraController" type="GlobeCameraController" parent="." unique_id=380428357]
@@ -60,16 +60,16 @@ far = 200000000.0
 [node name="Panel" type="MarginContainer" parent="HUD" unique_id=1594394931]
 offset_left = 12.0
 offset_top = 12.0
-offset_right = 332.0
-offset_bottom = 136.0
+offset_right = 412.0
+offset_bottom = 190.0
 
 [node name="Box" type="VBoxContainer" parent="HUD/Panel" unique_id=1173782674]
 layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="HomeButton" type="Button" parent="HUD/Panel/Box" unique_id=591727516]
+[node name="DatasetPicker" type="OptionButton" parent="HUD/Panel/Box" unique_id=591727516]
 layout_mode = 2
-text = "Home: fly to the 3D Tiles dataset"
+tooltip_text = "Switch the 3D Tiles dataset and fly to it"
 
 [node name="Status" type="Label" parent="HUD/Panel/Box" unique_id=1469890104]
 layout_mode = 2

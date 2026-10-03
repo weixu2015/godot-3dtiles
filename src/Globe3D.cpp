@@ -876,6 +876,13 @@ namespace tiles3d
 
     void Globe3D::rebuild()
     {
+        // The frame is cached and only invalidated on ENTER_TREE, but it is not only
+        // re-parenting that moves it: Georeference3D's origin authority can be re-pointed at
+        // runtime (the demo switches datasets, and the anchor has to follow the dataset or the
+        // content lands 17 000 km away in a float32 range where the quantisation is a metre).
+        // rebuild() is the one call every re-mesh path goes through, so re-resolve here rather
+        // than making every caller remember to.
+        frame_resolved_ = false;
         ensure_children();
         rebuild_surface();
         rebuild_graticule();

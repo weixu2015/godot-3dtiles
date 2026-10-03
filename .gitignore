@@ -85,6 +85,8 @@ demo/implicit_audit.gd.uid
 demo/implicit_audit.tscn
 demo/seam_probe.gd
 demo/seam_probe.gd.uid
+demo/precision_probe.gd
+demo/precision_probe.gd.uid
 
 # The harnesses that survive (globe_capture / globe_fly_audit / http_audit) are referenced
 # from their .tscn by path, so their uid sidecars are editor-generated noise rather than a

@@ -10,6 +10,12 @@ extends Node3D
 #
 # The scene renders correctly on its own; this script only adds convenience shortcuts so a
 # recording can move between viewpoints without touching the mouse.
+#
+# The HUD picker swaps the loaded 3D Tiles dataset and flies to it. Swapping a dataset is not
+# just a URL change: the georeference anchor has to follow the dataset (see
+# _sync_anchor_to_dataset), otherwise the content sits on the far side of the planet from the
+# anchor and lands in a float32 range whose quantisation is a metre - which is what a jitter
+# looks like when it is measured rather than eyeballed.
 
 @export var start_longitude_degrees: float = 105.0
 @export var start_latitude_degrees: float = 25.0
@@ -20,10 +26,28 @@ extends Node3D
 
 const EARTH_SEMI_MAJOR_AXIS := 6378137.0
 
+# Datasets the picker offers. Each entry is a label plus a tileset.json URL; nothing else has
+# to be kept in sync, because the position and the required anchor are both read back out of
+# the tileset itself once it loads.
+const DATASETS := [
+	{
+		"label": "Photogrammetry 1.1 (disk)",
+		"url": "E:/GISData/3D Tiles/1.1/Photogrammetry/tileset.json",
+	},
+	{
+		"label": "weinan (localhost:9090)",
+		"url": "http://localhost:9090/3D Tiles/weinan/tileset.json",
+	},
+]
+
 var _camera: Camera3D = null
 var _tileset: Node = null
 var _status: Label = null
+var _picker: OptionButton = null
 var _was_flying := false
+# Set between "the picker asked for a dataset" and "that dataset finished loading": the load
+# handler has to know whether to fly, or whether it is just a first load reporting in.
+var _pending_flight := false
 
 func _ready() -> void:
 	_camera = get_node_or_null("GlobeCameraController")
@@ -32,17 +56,114 @@ func _ready() -> void:
 	_tileset = get_node_or_null("Georeference3D/Tileset3D")
 	_status = get_node_or_null("HUD/Panel/Box/Status")
 
-	var home_button: Button = get_node_or_null("HUD/Panel/Box/HomeButton")
-	if home_button != null:
-		home_button.pressed.connect(home)
+	_picker = get_node_or_null("HUD/Panel/Box/DatasetPicker")
+	if _picker != null:
+		for entry in DATASETS:
+			_picker.add_item(entry["label"])
+		_picker.item_selected.connect(_on_dataset_selected)
+		if _tileset != null:
+			_select_picker_for_url(_tileset.url)
+	if _tileset != null:
+		_tileset.tileset_loaded.connect(_on_tileset_loaded)
+		_tileset.load_failed.connect(_on_load_failed)
 
 	# A recognisable opening view (default: over China), framed so the whole globe and its
 	# atmosphere fit comfortably.
 	_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
 	_aim_sun()
-	if _tileset != null:
-		_tileset.tileset_loaded.connect(_update_status)
 	_update_status()
+
+# ---- dataset picker ----------------------------------------------------------------------
+
+func _select_picker_for_url(url: String) -> void:
+	for i in DATASETS.size():
+		if DATASETS[i]["url"] == url:
+			_picker.select(i)
+			return
+
+# The picker doubles as the fly-in button: picking the dataset that is already loaded flies to
+# it, picking another one swaps the tileset and then flies once it has loaded.
+func _on_dataset_selected(index: int) -> void:
+	if _tileset == null or _status == null:
+		return
+	var entry: Dictionary = DATASETS[index]
+	var wanted: String = entry["url"]
+	if _tileset.url == wanted:
+		home()
+		return
+
+	_pending_flight = true
+	_status.text = "loading %s ..." % entry["label"]
+	_tileset.set_url(wanted)
+	# reload() rather than load(): load() on a live tileset would keep the old tree around
+	# while the new document streams in, and the two would both be reported as loaded.
+	_tileset.reload()
+
+func _on_tileset_loaded() -> void:
+	if not _pending_flight:
+		_update_status()
+		return
+	_pending_flight = false
+	_sync_anchor_to_dataset()
+	# Deferred: the anchor change re-resolves the frame and rebuilds both meshes this frame,
+	# and the flight distance is measured through the globe's frame.
+	home.call_deferred()
+
+func _on_load_failed(reason: String) -> void:
+	_pending_flight = false
+	if _status != null:
+		_status.text = "load failed: %s" % reason
+
+# Moves the ENU origin onto the dataset.
+#
+# This is the single lever that decides how much of the float32 budget the dataset gets. With
+# the origin on the dataset, tile vertices live within a few dataset radii of zero - tens of
+# kilometres at worst, where one float32 step is under a centimetre. With the origin left on
+# the other side of the planet (which is what the authored anchor was), the same vertices land
+# at 1.7e7 m and a single float32 step is a full metre, so the content shimmers while the
+# camera is still and the imagery layer buckets across the sphere.
+#
+# The anchor is taken from the tileset rather than from the entry above, because the tileset is
+# the authority on where it is: a converter that wrote a placeholder origin still reports its
+# real position, and the anchor has to agree with that, not with what the URL was expected to
+# contain.
+func _sync_anchor_to_dataset() -> void:
+	var geo := get_node_or_null("Georeference3D")
+	if geo == null or _tileset == null:
+		return
+	var authority: Resource = geo.get("origin_authority")
+	if authority == null or not authority.has_method("set_longitude"):
+		return
+
+	var lon: float = _tileset.get_dataset_longitude()
+	var lat: float = _tileset.get_dataset_latitude()
+	if is_equal_approx(float(authority.get("longitude")), lon) \
+			and is_equal_approx(float(authority.get("latitude")), lat):
+		return
+
+	authority.set("longitude", lon)
+	authority.set("latitude", lat)
+	authority.set("height", 0.0)
+
+	# Both layers bake the frame into their vertex positions, so a moved origin is only picked
+	# up when their meshes are rebuilt: the globe caches the resolved frame (rebuild()
+	# re-resolves it) and the imagery is only meshed on tile creation (reload_tiles() throws
+	# the tree away and re-creates it).
+	var globe := get_node_or_null("Georeference3D/Globe3D")
+	if globe != null:
+		globe.call("rebuild")
+	var layer := get_node_or_null("Georeference3D/GlobeTileLayer")
+	if layer != null:
+		layer.call("reload_tiles")
+
+# One float32 representable step at `magnitude`. Everything in a Godot transform is float32
+# unless the engine is built with double precision, so this is the floor on how precisely a
+# vertex or a camera position at that range can be placed - and a jitter is exactly this
+# number showing up as a screen-space wobble.
+func _float32_step(magnitude: float) -> float:
+	if magnitude <= 0.0:
+		return 0.0
+	return pow(2.0, floor(log(magnitude) / log(2.0)) - 23.0)
 
 # Flies to wherever the 3D Tiles dataset says it is, so the dataset can be checked without
 # knowing its coordinates. This is deliberately driven by the tileset's own transform rather
@@ -114,6 +235,19 @@ func _update_status(prefix: String = "") -> void:
 		text += "\nanchor is %.1f km away" % [separation / 1000.0]
 		if separation > maxf(radius * 3.0, 10000.0):
 			text += "\nWARNING: not visible from the anchor"
+
+	# The precision readout. A model is as still as the float32 grid it is authored in is fine,
+	# and the grid spacing follows the magnitude of the coordinates. Two magnitudes matter here
+	# and only the first one is fixable by moving the anchor:
+	#   content - the dataset's own extent, because a tile localises its vertices inside the
+	#             tile and the tiles live inside the dataset;
+	#   planet  - the globe surface and the camera are 6.4e6 m from the origin whatever the
+	#             anchor is, so the planet layer keeps this step until the frame itself is
+	#             rebased (origin shift), not until the anchor moves.
+	var content_step: float = _float32_step(radius)
+	var planet_step: float = _float32_step(EARTH_SEMI_MAJOR_AXIS)
+	text += "\norigin to dataset " + ("n/a" if separation < 0.0 else str(separation / 1000.0) + " km")
+	text += "\nfloat32 step: content " + str(content_step) + " m / planet " + str(planet_step) + " m"
 	if prefix != "":
 		text = prefix + "\n" + text
 
@@ -155,17 +289,21 @@ func _aim_sun() -> void:
 	if globe == null:
 		return
 
-	# Position matters only for the light's own debug gizmo - a DirectionalLight3D shades by
-	# orientation alone. orienting it via look_at() from the sun's position towards the Earth's
-	# centre is what makes its -Z point *from* the sun *at* the planet.
 	var centre: Vector3 = globe.call("ecef_to_local", Vector3.ZERO)
 	var world_centre: Vector3 = globe.to_global(centre)
 	var sun_position: Vector3 = globe.to_global(globe.call("get_sun_position") as Vector3)
 
+	# Position matters only for the light's own debug gizmo - a DirectionalLight3D shades by
+	# orientation alone. It is set NEXT TO THE CAMERA rather than at the sun's real distance
+	# on purpose: the sun sits 1e8 m away (far * 0.5), and a light parked that far from the
+	# origin while the camera's far plane is 2e8 is what makes the light culler's frustum
+	# degenerate - it is the "create_frustum_points" failure the engine spams when the camera
+	# is close to the surface. The orientation is unchanged either way.
+	var sun_direction: Vector3 = (sun_position - world_centre).normalized()
 	var up := Vector3(0, 1, 0)
-	if absf((sun_position - world_centre).normalized().dot(up)) > 0.99:
+	if absf(sun_direction.dot(up)) > 0.99:
 		up = Vector3(0, 0, 1)
-	sun.global_position = sun_position
+	sun.global_position = _camera.global_position + sun_direction * 1000.0
 	sun.look_at(world_centre, up)
 
 func _unhandled_input(event: InputEvent) -> void:
