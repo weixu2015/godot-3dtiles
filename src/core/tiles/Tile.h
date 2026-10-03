@@ -73,7 +73,25 @@ namespace tiles3d::core
 
         SubdivisionScheme subdivisionScheme = SubdivisionScheme::Quadtree;
         int subtreeLevels = 0;
+
+        /// 1.0 extension `maximumLevel`: the deepest *level index* the tileset declares.
         int maximumLevel = 0;
+
+        /// 1.1 `availableLevels`: the deepest *count of levels*, i.e. level indices run
+        /// 0 .. availableLevels-1. -1 when the document does not declare it.
+        int availableLevels = -1;
+
+        /// Deepest tile level index allowed, or -1 for "not capped by level" (the tree then
+        /// terminates purely through subtree availability, which is how the reference
+        /// behaviour falls out when only `availableLevels` is present and unread).
+        int levelCap() const
+        {
+            if ( availableLevels > 0 )
+            {
+                return availableLevels - 1;
+            }
+            return maximumLevel > 0 ? maximumLevel : -1;
+        }
 
         /// URI template for subtree files, e.g. "subtrees/{level}/{x}/{y}.subtree".
         std::string subtreeUriTemplate;
@@ -146,6 +164,13 @@ namespace tiles3d::core
 
         std::optional<ImplicitTiling> implicitTiling;
         std::optional<ImplicitCoordinates> implicitCoordinates;
+
+        /// True once an implicit tile's children have been built from its subtree file.
+        ///
+        /// Implicit children are materialised lazily on first refinement, so this is what
+        /// separates "not expanded yet" from "expanded and genuinely childless" - without
+        /// it the traversal would try to reload the subtree on every frame.
+        bool implicitChildrenMaterialized = false;
 
         /// True for a container tile created by an external tileset. Its empty content must
         /// not stop refinement.

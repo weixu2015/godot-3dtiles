@@ -76,6 +76,11 @@ namespace tiles3d::core
         /// its existing behaviour.
         ModelUpAxis modelUpAxis = ModelUpAxis::Y;
 
+        /// Next free tile id. Tiles created later - implicit children materialised from a
+        /// subtree file, in particular - must continue the pre-order numbering rather than
+        /// restart it, so the caller seeds its own counter from this.
+        std::size_t nextId = 0;
+
         /// Empty on success, otherwise a human readable reason.
         std::string error;
 

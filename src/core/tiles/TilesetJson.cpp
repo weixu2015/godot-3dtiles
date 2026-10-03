@@ -76,6 +76,11 @@ namespace tiles3d::core
             tiling.subtreeLevels = readInt( value, "subtreeLevels", 0 );
             tiling.maximumLevel = readInt( value, "maximumLevel", 0 );
 
+            // 3D Tiles 1.1 renamed the level bound: availableLevels counts levels (so the
+            // deepest index is availableLevels - 1) while the 1.0 extension's maximumLevel is
+            // already an index. Keep both and let levelCap() reconcile them.
+            tiling.availableLevels = readInt( value, "availableLevels", -1 );
+
             const auto subtreesIt = value.find( "subtrees" );
             if ( subtreesIt != value.end() && subtreesIt->is_object() )
             {
@@ -359,6 +364,10 @@ namespace tiles3d::core
 
         std::size_t nextId = 0;
         result.root = parseTile( *rootIt, 0, rootRefine, nextId, result.error );
+
+        // Expose the counter so tiles materialised later (implicit children) keep the
+        // pre-order numbering unique instead of colliding with the parsed tree.
+        result.nextId = nextId;
         return result;
     }
 

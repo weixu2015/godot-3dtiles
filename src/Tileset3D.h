@@ -74,6 +74,10 @@ namespace tiles3d
         /// for every tile, external tilesets included.
         core::ModelUpAxis model_up_axis_ = core::ModelUpAxis::Y;
 
+        /// Next free tile id. Seeded from the parser so implicit children materialised later
+        /// keep the pre-order numbering unique.
+        std::size_t next_tile_id_ = 0;
+
         std::size_t tile_count = 0;
         int maximum_depth = 0;
         godot::String last_error;
@@ -138,6 +142,14 @@ namespace tiles3d
         /// against `directory`, the document that declared them, rather than against the
         /// root tileset's directory.
         void rebase_content_uris( core::Tile &tile, const godot::String &directory );
+
+        /// Materialises a tile's implicit children from its subtree file, once.
+        ///
+        /// Implicit tiles have no children until the `.subtree` that describes their level is
+        /// decoded, so the traversal calls this the first time a tile actually wants to
+        /// refine. Doing it here - rather than expanding the whole tree at load - is what
+        /// keeps a deep implicit root from materialising everything up front.
+        void ensure_implicit_children( core::Tile &tile );
 
         /// The Georeference3D this node ultimately descends from, or null. A null result
         /// means the tileset uses its own implicit georeference (origin centred on its ECEF

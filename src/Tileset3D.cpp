@@ -9,6 +9,7 @@
 #include "core/math/BoundingVolume.h"
 #include "core/math/Mat4.h"
 #include "core/math/ScreenSpaceError.h"
+#include "core/tiles/Subtree.h"
 #include "core/tiles/TilesetJson.h"
 
 #include <nlohmann/json.hpp>
@@ -866,6 +867,7 @@ namespace tiles3d
         asset_version = String( parsed.assetVersion.c_str() );
         root_geometric_error = parsed.geometricError;
         model_up_axis_ = parsed.modelUpAxis;
+        next_tile_id_ = parsed.nextId;
 
         // Content URIs in a tileset are relative to the tileset document.
         base_directory = path.get_base_dir();
@@ -912,6 +914,25 @@ namespace tiles3d
             upAxisName, placed_by_georeference ? "yes" : "no (origin-centred fallback)" ) );
 
         report_georeference();
+
+        // Implicit tiling has no children until a subtree is decoded, so the tile count above
+        // only covers the parsed stump. Print the declaration so it is obvious which mode the
+        // tileset is in and whether the level bound was understood.
+        if ( root->implicitTiling.has_value() )
+        {
+            const core::ImplicitTiling &implicit = *root->implicitTiling;
+            UtilityFunctions::print( godot::vformat(
+                "[Tileset3D] implicit tiling: scheme=%s subtreeLevels=%d availableLevels=%d "
+                "levelCap=%d subtrees='%s' content='%s'",
+                implicit.subdivisionScheme == core::ImplicitTiling::SubdivisionScheme::Octree
+                    ? "octree"
+                    : "quadtree",
+                implicit.subtreeLevels, implicit.availableLevels, implicit.levelCap(),
+                String( implicit.subtreeUriTemplate.c_str() ),
+                implicit.contentUriTemplate.has_value()
+                    ? String( implicit.contentUriTemplate->c_str() )
+                    : String( "(none)" ) ) );
+        }
 
         emit_signal( "tileset_loaded" );
     }
@@ -1104,6 +1125,86 @@ namespace tiles3d
         {
             rebase_content_uris( *child, directory );
         }
+    }
+
+    void Tileset3D::ensure_implicit_children( core::Tile &tile )
+    {
+        if ( !tile.implicitTiling.has_value() || tile.implicitChildrenMaterialized )
+        {
+            return;
+        }
+
+        // One attempt per tile. A subtree that cannot be opened will not start succeeding, and
+        // retrying every frame would flood the output with the same message.
+        tile.implicitChildrenMaterialized = true;
+
+        if ( !tile.implicitCoordinates.has_value() )
+        {
+            return;
+        }
+
+        const core::ImplicitTiling &decl = *tile.implicitTiling;
+        const int subtreeLevels = decl.subtreeLevels;
+        if ( subtreeLevels <= 0 || decl.subtreeUriTemplate.empty() )
+        {
+            return;
+        }
+
+        const int level = tile.implicitCoordinates->level;
+        const int cap = decl.levelCap();
+        if ( cap >= 0 && level + 1 > cap )
+        {
+            return;
+        }
+
+        const bool isOctree =
+            decl.subdivisionScheme == core::ImplicitTiling::SubdivisionScheme::Octree;
+        const int branchingFactor = decl.branchingFactor();
+
+        // Morton coordinates of the subtree that owns this tile: the level is floored to a
+        // multiple of subtreeLevels and the in-plane coordinates to the same granularity
+        // (bf^levelDiff), which is how the reference addresses a subtree from one of its tiles.
+        const int rootLevel = ( level / subtreeLevels ) * subtreeLevels;
+        std::int64_t scale = 1;
+        for ( int i = level - rootLevel; i > 0; --i )
+        {
+            scale *= branchingFactor;
+        }
+
+        const core::ImplicitCoordinates &coords = *tile.implicitCoordinates;
+        const int subtreeX = static_cast<int>( ( coords.x / scale ) * scale );
+        const int subtreeY = static_cast<int>( ( coords.y / scale ) * scale );
+        const int subtreeZ = isOctree ? static_cast<int>( ( coords.z / scale ) * scale ) : 0;
+
+        const String subtreeUri =
+            String( core::replaceTemplate( decl.subtreeUriTemplate, rootLevel, subtreeX, subtreeY,
+                                           subtreeZ )
+                        .c_str() );
+        const String subtreePath =
+            subtreeUri.is_absolute_path() ? subtreeUri : base_directory.path_join( subtreeUri );
+
+        Ref<FileAccess> file = FileAccess::open( subtreePath, FileAccess::READ );
+        if ( file.is_null() )
+        {
+            UtilityFunctions::printerr( "[Tileset3D] cannot open subtree '", subtreePath, "'" );
+            return;
+        }
+
+        const PackedByteArray bytes =
+            file->get_buffer( static_cast<std::int64_t>( file->get_length() ) );
+        file->close();
+
+        core::SubtreeData subtree;
+        std::string error;
+        if ( !core::parseSubtree( reinterpret_cast<const std::uint8_t *>( bytes.ptr() ),
+                                  static_cast<std::size_t>( bytes.size() ), subtree, error ) )
+        {
+            UtilityFunctions::printerr( "[Tileset3D] subtree '", subtreePath,
+                                        "': ", String( error.c_str() ) );
+            return;
+        }
+
+        core::expandImplicitSubtree( tile, subtree, decl, next_tile_id_ );
     }
 
     void Tileset3D::count_tiles()
@@ -1481,6 +1582,14 @@ namespace tiles3d
 
         const bool wantsRefine = tile.isExternalTileset || forceRefine || unconditionallyRefine ||
                                  sse > maximum_screen_space_error;
+
+        // Implicit tiles have no children until their subtree is decoded. Materialise on the
+        // first refinement so the tree below this tile is real before anything walks it; doing
+        // it here rather than at load is what keeps a deep implicit root cheap to open.
+        if ( wantsRefine && tile.implicitTiling.has_value() )
+        {
+            ensure_implicit_children( tile );
+        }
 
         const double childConditionalGe =
             ( hasContentUri && !unconditionallyRefine ) ? tile.geometricError : nearest_conditional_ge;
