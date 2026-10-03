@@ -155,6 +155,7 @@ namespace tiles3d::core
                 if ( const auto numbers = readNumbers<16>( *it ); numbers.has_value() )
                 {
                     tile->transform = math::fromColumnMajor( numbers->data() );
+                    tile->hasDeclaredTransform = true;
                 }
             }
 

@@ -398,6 +398,7 @@ namespace tiles3d
                               &Tileset3D::get_anchor_separation );
         ClassDB::bind_method( D_METHOD( "is_placed_by_georeference" ),
                               &Tileset3D::is_placed_by_georeference );
+        ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
         ClassDB::bind_method( D_METHOD( "get_loaded_tile_count" ),
                               &Tileset3D::get_loaded_tile_count );
         ClassDB::bind_method( D_METHOD( "get_last_rendered_count" ),
@@ -596,12 +597,36 @@ namespace tiles3d
         }
 
         // Implicit per-tileset georeference (single tileset, no Georeference3D parent).
-        // Build an ENU frame at the dataset's own ECEF centre so coordinates stay small
-        // (float32 safe) and the dataset is centred on this node's origin. The fallback this
-        // used to use - inverse(root->transform) - is identity for region datasets, which
-        // left every coordinate at full ECEF magnitude (~6.4e6 m) and blew up float32
-        // precision. We also bake in the Z-up -> Y-up flip so the result is oriented exactly
-        // like a tileset placed under an explicit Georeference3D.
+        //
+        // Whether this dataset may be treated as georeferenced is decided by what the
+        // tileset *declares*, never by inspecting the numbers - a bounding volume that
+        // happens to sit on the ellipsoid is not the same as a dataset that says where it
+        // is. The two declaring forms are:
+        //
+        //   * the root has a `region` bounding volume. A region is absolute EPSG:4979
+        //     geodetic coordinates and, per the spec, is *not* run through the tile
+        //     transform chain - so its place in the render frame is `modelMatrix * ECEF`.
+        //     It can only be made renderable by supplying a modelMatrix, and ENU is that
+        //     matrix.
+        //
+        //   * the root has a `transform`. The author is stating where the subtree sits
+        //     relative to the frame its coordinates are expressed in, which for a
+        //     georeferenced dataset is ECEF. `transform[3]` is then a real surface position
+        //     and is exactly the anchor to build ENU from.
+        //
+        // Everything else is authored in its own coordinate space and must use the reference
+        // implementation's model, `inverse(rootTransform)` - which for the usual identity
+        // case simply keeps the content where the author put it. That includes the tricky
+        // case this rule was written for: Aerometrex-SanFrancisco-2cm has a root `sphere`
+        // centred on the ellipsoid (so it *looks* georeferenced) but no `transform`, and its
+        // b3dm payloads carry full-ECEF `RTC_CENTER`. Running those through an ENU frame
+        // while leaving RTC_CENTER in the tile's own space moves the tile tree ~6370 km away
+        // from the content, and the dataset renders as an empty frame.
+        //
+        // The Z-up -> Y-up flip is baked into the ENU branch only. A dataset authored in its
+        // own space has no declared up axis to reconcile with, and rotating it would move
+        // content away from the origin it was authored around; `asset.gltfUpAxis` still
+        // drives per-content correction in ContentFactory, which is where it belongs.
         //
         // The implicit frame is cached at load time (see below): the dataset's root bounding
         // volume is rewritten from region to box during load, so recomputing it afterwards
@@ -611,14 +636,27 @@ namespace tiles3d
             return *model_matrix_;
         }
 
-        const math::Vec3 rootCenter =
-            root->boundingVolume.has_value()
-                ? math::boundingVolumeCenter( *root->boundingVolume )
-                : math::Vec3( 0.0 );
-        const math::Vec3 ecefCenter = math::transformPoint( root->transform, rootCenter );
-        const math::Mat4 enuToEcef = math::eastNorthUpToFixedFrame( ecefCenter );
-        const math::Mat4 ecefToEnu = math::invert( enuToEcef );
-        const math::Mat4 model = math::multiply( z_up_to_y_up(), ecefToEnu );
+        const bool rootHasRegion = root->boundingVolume.has_value() &&
+            root->boundingVolume->type == math::BoundingVolume::Type::Region;
+
+        if ( rootHasRegion || root->hasDeclaredTransform )
+        {
+            const math::Vec3 rootCenter =
+                root->boundingVolume.has_value()
+                    ? math::boundingVolumeCenter( *root->boundingVolume )
+                    : math::Vec3( 0.0 );
+            const math::Vec3 ecefCenter = math::transformPoint( root->transform, rootCenter );
+
+            const math::Mat4 enuToEcef = math::eastNorthUpToFixedFrame( ecefCenter );
+            const math::Mat4 ecefToEnu = math::invert( enuToEcef );
+            const math::Mat4 model = math::multiply( z_up_to_y_up(), ecefToEnu );
+            model_matrix_ = model;
+            return model;
+        }
+
+        // Authored in its own space: mirror the reference's inverse(rootTransform). This is
+        // always a well-defined affine transform, so it can never inject NaNs.
+        const math::Mat4 model = math::invert( root->transform );
         model_matrix_ = model;
         return model;
     }
@@ -1322,6 +1360,11 @@ namespace tiles3d
     bool Tileset3D::is_placed_by_georeference() const
     {
         return placed_by_georeference;
+    }
+
+    double Tileset3D::get_dataset_radius() const
+    {
+        return dataset_radius;
     }
 
     void Tileset3D::dump_tree( const int max_depth ) const

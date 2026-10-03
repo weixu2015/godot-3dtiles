@@ -147,6 +147,18 @@ namespace tiles3d::core
         /// Local -> parent transform. Identity unless the tileset JSON supplies one.
         math::Mat4 transform = math::identity();
 
+        /// True when the tileset JSON actually supplied a `transform` for this tile.
+        ///
+        /// `transform` alone cannot answer this: an omitted transform and an explicit identity
+        /// are indistinguishable once parsed, yet they mean different things for a *root*
+        /// tile. A root `transform` is the author declaring where the dataset sits relative
+        /// to ECEF (or to whatever frame the tree is authored in), which is what justifies
+        /// deriving an ENU frame from it. A root without one is authored in its own space -
+        /// including the case where the coordinates merely *happen* to look like ECEF, such
+        /// as a `sphere` bounding volume freshly cut from a georeferenced source but never
+        /// given a transform.
+        bool hasDeclaredTransform = false;
+
         /// Geometric error in metres. Drives level of detail refinement.
         double geometricError = 0.0;
 
