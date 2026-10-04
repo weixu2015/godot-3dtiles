@@ -44,9 +44,17 @@ demo/globe_shots/
 demo/_*.png
 demo/_*.png.import
 
+# Every temporary log this repo produces lives in log/ (scripts/build_tests.ps1,
+# scripts/globe_capture.ps1 and scripts/globe_sweep.ps1 write there, and probes are run with
+# their stdout redirected there). The dir is created on demand by the scripts, so it is the
+# whole directory that is ignored - individual names would just invite the next script to
+# write somewhere else and start the mess over.
+log/
+
 # Audit harness output. The globe audit writes one log per diagnostic run plus a numbered
 # PNG, and a session that bisects a rendering bug produces dozens of both. None of it is
 # source, and the sheer count drowns `git status` so badly that real changes get missed.
+# Kept in addition to log/ because a stray `> something.log` is easy to type by accident.
 *.log
 *.log.err
 *.log.txt
@@ -113,3 +121,48 @@ demo/cull_probe.gd
 demo/cull_probe.gd.uid
 demo/cull_probe.png
 demo/cull_probe.png.import
+
+# Camera-feel probes. pan_probe re-measures the drag transfer function and the wheel notch
+# ratio, flight_probe replays a dataset switch end to end (lands above the ellipsoid? over the
+# dataset? does an idle hand kill the flight?), and micro*_probe are the narrower instruments
+# the coefficient derivation needed. Local verification only - they hard-code E:/GISData.
+demo/pan_probe.gd
+demo/pan_probe.gd.uid
+demo/flight_probe.gd
+demo/flight_probe.gd.uid
+demo/micro_probe.gd
+demo/micro_probe.gd.uid
+demo/micro2_probe.gd
+demo/micro2_probe.gd.uid
+demo/micro3_probe.gd
+demo/micro3_probe.gd.uid
+demo/micro4_probe.gd
+demo/micro4_probe.gd.uid
+demo/micro5_probe.gd
+demo/micro5_probe.gd.uid
+demo/micro6_probe.gd
+demo/micro6_probe.gd.uid
+
+# Camera-pivot / interaction probes: pivot_probe checks the two reference invariants (an orbit
+# keeps the planet centre on screen, a tilt keeps its screen-centre pivot there), switch_probe
+# watches a dataset switch for frames long enough to read as a jump, icosphere_probe replays the
+# dataset that declares itself at the Earth's centre.
+demo/pivot_probe.gd
+demo/pivot_probe.gd.uid
+demo/switch_probe.gd
+demo/switch_probe.gd.uid
+demo/icosphere_probe.gd
+demo/icosphere_probe.gd.uid
+# drag_tile_probe settles on the tile view and nudges the left button a few pixels at a time,
+# reporting what the camera AND the tileset did - it is how "nudge the button and the tile is
+# gone" is reproduced and how a fix is shown to remove it.
+demo/drag_tile_probe.gd
+demo/drag_tile_probe.gd.uid
+# tilt_dir_probe measures the tilt gesture the two ways it is described in reports: does dragging
+# up slide the ground down (direction), and does the gesture keep rotating or pin against a limit.
+demo/tilt_dir_probe.gd
+demo/tilt_dir_probe.gd.uid
+
+# Mipmap verification captures from the 2026-10-04 aliasing work: local evidence, not source.
+demo/mip_verify*.png
+demo/mip_verify*.png.import

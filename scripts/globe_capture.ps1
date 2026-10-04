@@ -13,10 +13,13 @@ param(
     [double]$AtmoIntensity = -1,
     [double]$AtmoScale = -1,
     [int]$TimeoutSeconds = 120,
-    [string]$LogPath = "globe_capture.log"
+    # Relative to the project root, and intentionally under log/: run output at the root buried
+    # the files that are actually source.
+    [string]$LogPath = "log/globe_capture.log"
 )
 
 $ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force -Path (Join-Path $PWD "log") | Out-Null
 $godot = "E:\Games\godot\Godot_v4.7.2-stable_win64_console.exe"
 $demo = Join-Path $PSScriptRoot "..\demo"
 

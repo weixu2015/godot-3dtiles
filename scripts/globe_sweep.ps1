@@ -48,7 +48,7 @@ foreach ($v in $Variants) {
         continue
     }
     $png = "demo/_sw_${v}_${stamp}.png"
-    $log = "sweep_${v}_${stamp}.log"
+    $log = "log/sweep_${v}_${stamp}.log"
 
     # Clear every knob first. Inherited values from an earlier iteration would silently make this
     # run a two-variable experiment, which is exactly the failure this script exists to prevent.
@@ -73,7 +73,7 @@ foreach ($k in @("GLOBE_DEBUG_ALBEDO", "GLOBE_GROUND_OFF", "GLOBE_FORCE_SHELL",
 }
 
 Write-Host ""
-Write-Host "logs:  $root\sweep_*_${stamp}.log"
+Write-Host "logs:  $root\log\sweep_*_${stamp}.log"
 Write-Host "pngs:  $root\demo\_sw_*_${stamp}.png"
 
 # Diff consecutive variants pairwise. The audit samples a dozen points, so two renders can differ
