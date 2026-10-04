@@ -65,7 +65,14 @@ namespace tiles3d
         // locomotion.
         constexpr double kLogDistancePerNotch = 0.2;  // e^0.2 per notch, about 1.22x
         constexpr double kMaxFlickLogTravel = 1.0;    // cap on one flick, about 2.7x
-        constexpr double kStopFlickLogTravel = 0.15;  // settle once this little is left
+        /// The ease stops once the remaining velocity is worth this little travel. It has to be
+        /// well under kLogDistancePerNotch: at 0.15 (the reference's value) the *stop threshold*
+        /// was 0.15 x damping = 0.9 against an impulse of 0.2 x damping = 1.2, so the integrator
+        /// quit after two or three frames and one notch delivered 0.061 of the 0.2 it promises -
+        /// and, because the number of frames that fit in a time constant is 1/dt, that shortfall
+        /// moved with the frame rate (0.055 at 60 fps, 0.073 at 30). Measured before: ratio 0.941
+        /// per notch instead of 0.819.
+        constexpr double kStopFlickLogTravel = 0.02;
 
         /// The wheel zoom bottoms out this far from the screen-centre ground focus (the
         /// map-cesium wrapper's WHEEL_MIN_DIST, its comment names the goal: 防止穿地).
@@ -73,6 +80,23 @@ namespace tiles3d
         /// is refused outright below this altitude - with the ellipsoid clamp that is
         /// three agreeing nets under the camera.
         constexpr double kWheelMinFocusDistance = 10.0;
+
+        /// Ceiling on the orbit transfer function, in units of "camera altitude / planet radius".
+        /// The reference uses the same 1.77 as the top of its clamp; above it the drag stops
+        /// speeding up, which is what keeps a far-out viewpoint from spinning the globe wildly.
+        constexpr double kMaximumRotateRate = 1.77;
+
+        /// The reference's MINIMUM_TRACKBALL_HEIGHT: above this altitude a tilt whose
+        /// screen-centre ray misses the planet still pivots on the ray's closest approach to the
+        /// ellipsoid centre, so the gesture never silently changes meaning with distance.
+        constexpr double kMinimumTrackballHeight = 7500000.0;
+
+        /// The most poleward latitude an ENU anchor may be moved to. East and north are both
+        /// undefined at a pole, so the derived basis is degenerate - with the anchor at lat 90 a
+        /// single frame ran for twenty seconds (Icospheres declares its centre there) instead of
+        /// the usual millisecond. Refusing keeps the previous anchor, which is always a valid
+        /// frame; the caller reports why it did not move.
+        constexpr double kMaximumAnchorLatitude = 89.5;
 
         constexpr double kInertiaMaxClickTime = 0.4;
         constexpr double kInertiaStopFactor = 0.001;
@@ -128,24 +152,6 @@ namespace tiles3d
         double clampd( const double value, const double low, const double high )
         {
             return value < low ? low : ( value > high ? high : value );
-        }
-
-        /// Altitude-adaptive motion scale for the rotate/pan gestures.
-        ///
-        /// The reference's rotate curve is tuned for planetary viewing; near the surface
-        /// the same drag reads as "one flick and I am on another continent". The scale
-        /// falls with the camera's height above the ellipsoid: full speed at 10 km and
-        /// above, ~0.5 at 100 m, ~0.15 near the ground - so each drag pixel keeps
-        /// shrinking with the altitude instead of staying constant. The WHEEL ZOOM does
-        /// NOT use this anymore: its integrator now works in the camera-to-focus space
-        /// (see wheel_focus_parent), where one notch is already a fixed ratio of the
-        /// distance to the ground and needs no altitude compensation.
-        /// `rotate_speed_scale` / `zoom_speed_scale` remain the user-facing multipliers on
-        /// top of this.
-        double altitude_motion_scale( const double height_m )
-        {
-            const double decades = std::log10( std::max( height_m, 1.0 ) );
-            return clampd( decades / 4.0, 0.15, 1.0 );
         }
 
         /// The reference `inertiaDecay`: exponential fade over time.
@@ -301,6 +307,10 @@ namespace tiles3d
 
         ClassDB::bind_method( D_METHOD( "shift_origin_now" ),
                               &GlobeCameraController::shift_origin_now );
+
+        ClassDB::bind_method( D_METHOD( "reanchor_preserving_view", "p_longitude_degrees",
+                                        "p_latitude_degrees" ),
+                              &GlobeCameraController::reanchor_preserving_view );
         ClassDB::bind_method( D_METHOD( "get_origin_shift_count" ),
                               &GlobeCameraController::get_origin_shift_count );
         ClassDB::bind_method( D_METHOD( "get_origin_shift_milliseconds" ),
@@ -876,6 +886,74 @@ namespace tiles3d
         return true;
     }
 
+    bool GlobeCameraController::reanchor_preserving_view( const double p_longitude_degrees,
+                                                          const double p_latitude_degrees )
+    {
+        godot::Node3D *carrier = const_cast<godot::Node3D *>( resolve_frame_node() );
+        Georeference3D *reference = Object::cast_to<Georeference3D>( carrier );
+        if ( reference == nullptr )
+        {
+            return false;
+        }
+        const godot::Ref<godot::Resource> authority = reference->get_origin_authority();
+        if ( authority.is_null() || !authority->has_method( "set_longitude" ) )
+        {
+            return false;
+        }
+
+        // A pole has no ENU frame. See kMaximumAnchorLatitude: the anchor is left where it was
+        // rather than moving it somewhere degenerate.
+        if ( std::abs( p_latitude_degrees ) > kMaximumAnchorLatitude )
+        {
+            return false;
+        }
+
+        const auto to_vec3 = []( const Vector3 &p_v ) {
+            return math::Vec3( static_cast<double>( p_v.x ), static_cast<double>( p_v.y ),
+                               static_cast<double>( p_v.z ) );
+        };
+        const auto to_godot = []( const math::Vec3 &p_v ) {
+            return Vector3( static_cast<float>( p_v.x ), static_cast<float>( p_v.y ),
+                            static_cast<float>( p_v.z ) );
+        };
+
+        // 1. Where the camera is and where it looks, all the way out to ECEF in doubles. That is
+        //    the only representation of the view that survives the frame being replaced: a
+        //    parent-space position or a world-space direction belongs to one particular anchor.
+        const GlobeFrame old_frame = frame();
+        const math::Vec3 camera_ecef =
+            old_frame.to_ecef_z_up( to_vec3( frame_point_from_parent( get_position() ) ) );
+        // A direction rides along as a point one unit further out, so the translation cancels.
+        const math::Vec3 forward_ecef =
+            old_frame.to_ecef_z_up( to_vec3( frame_point_from_parent(
+                                        get_position() + get_camera_direction() ) ) ) -
+            camera_ecef;
+        const math::Vec3 up_ecef =
+            old_frame.to_ecef_z_up( to_vec3( frame_point_from_parent(
+                                        get_position() + get_camera_up() ) ) ) -
+            camera_ecef;
+
+        // 2. Move the anchor. The authority's changed signal refreshes the frame, which is what
+        //    re-places every content node - the jump this function exists to hide.
+        authority->set( "longitude", p_longitude_degrees );
+        authority->set( "latitude", p_latitude_degrees );
+        authority->set( "height", 0.0 );
+
+        // 3. Put the camera back where it was, re-expressed through the frame that just moved.
+        const GlobeFrame new_frame = frame();
+        const math::Vec3 new_local = new_frame.to_local( camera_ecef );
+        const Vector3 position = frame_point_to_parent( to_godot( new_local ) );
+        const Vector3 direction = frame_direction_to_parent(
+            to_godot( new_frame.to_local( camera_ecef + forward_ecef ) - new_local ) );
+        const Vector3 up = frame_direction_to_parent(
+            to_godot( new_frame.to_local( camera_ecef + up_ecef ) - new_local ) );
+        set_camera_pose( position, direction, up );
+
+        // This is a rebase by another name as far as the content is concerned.
+        origin_shift_count_ += 1;
+        return true;
+    }
+
     void GlobeCameraController::update_origin_shift()
     {
         // How far the camera has strayed from the frame's origin, measured in the frame's own
@@ -946,16 +1024,79 @@ namespace tiles3d
 
     // ---- camera manipulation ----
 
+    double GlobeCameraController::clamp_polar_pitch( const Vector3 &p_pivot,
+                                                   const double p_delta ) const
+    {
+        (void)p_pivot;
+        // The elevation is the camera's GEOCENTRIC LATITUDE, read in the globe frame - Y-up ECEF,
+        // where Y really is the polar axis - because that is the frame the reference reads it in:
+        //   camera.position.y / camera.position.length()      (QuadtreeGlobe.ts:437)
+        //
+        // Reading it in the camera's parent frame instead is what made the left drag jump. The
+        // parent frame's Y is the local up at the anchor, so a camera anywhere near the anchor
+        // measures relative.y / |relative| ~ 1 whatever its latitude, asin() saturates at exactly
+        // pi/2, and kElLimit (pi/2 - 0.01) then reports the camera as 0.01 rad outside a limit it
+        // is nowhere near. The reference's clamp(currentEl + delta) - currentEl turns that reading
+        // into a -0.01 rad pitch - 0.01 x 6371 km = 63.7 km of ground - for every drag event, and
+        // pins the elevation to the limit, so the camera also cannot keep rotating. (In JS the same
+        // expression is harmless: the ratio is a float64 that never quite reaches 1.)
+        const Vector3 camera_local = frame_point_from_parent( get_position() );
+        const math::Vec3 camera_ecef = frame().camera_ecef_y_up(
+            math::Vec3( static_cast<double>( camera_local.x ),
+                        static_cast<double>( camera_local.y ),
+                        static_cast<double>( camera_local.z ) ) );
+        const double length = glm::length( camera_ecef );
+        if ( length < 1e-9 )
+        {
+            return p_delta;
+        }
+        const double current_el = std::asin( clampd( camera_ecef.y / length, -1.0, 1.0 ) );
+
+        // An elevation already outside the limit is left alone rather than dragged back to it:
+        // that only happens over the frame's pole, and the clamp is meant to stop the drag from
+        // TAKING the camera past the limit, not to answer every event with the margin itself.
+        if ( std::abs( current_el ) >= kElLimit )
+        {
+            return p_delta;
+        }
+        return clampd( current_el + p_delta, -kElLimit, kElLimit ) - current_el;
+    }
+
     void GlobeCameraController::rotate_camera_around( const Vector3 &p_pivot,
                                                       const Vector3 &p_axis, const double p_angle )
     {
-        const Quaternion rotation( p_axis.normalized(), static_cast<float>( p_angle ) );
-
-        // Position: rotate the offset from the pivot.
-        const Vector3 offset = get_position() - p_pivot;
-        set_position( p_pivot + rotation.xform( offset ) );
+        // Position: rotate the offset from the pivot, then add it back.
+        //
+        // The arithmetic is DOUBLED on purpose, and it is not a micro-optimisation. The left
+        // drag's pivot is the planet centre, so the offset is ~6.4e6 m and the result is
+        // `pivot + rotated_offset` - two 6.4e6 m values cancelling down to a camera position of a
+        // few hundred metres. In float32 that cancellation leaves the 0.38 m tick of a 6.4e6 m
+        // value, so a ground-level drag advances in half-metre steps however small the rotation
+        // is. The reference does not have the problem (its numbers are float64); a port onto a
+        // float32 scene graph has to ask for the precision explicitly at exactly this line.
+        const godot::Vector3 offset = get_position() - p_pivot;
+        const math::Vec3 offset_d( static_cast<double>( offset.x ), static_cast<double>( offset.y ),
+                                   static_cast<double>( offset.z ) );
+        const math::Vec3 pivot_d( static_cast<double>( p_pivot.x ),
+                                  static_cast<double>( p_pivot.y ),
+                                  static_cast<double>( p_pivot.z ) );
+        const math::Vec3 axis_d( static_cast<double>( p_axis.x ), static_cast<double>( p_axis.y ),
+                                 static_cast<double>( p_axis.z ) );
+        const math::Vec3 unit_axis = glm::length( axis_d ) > 1e-12
+                                         ? glm::normalize( axis_d )
+                                         : math::Vec3( 0.0, 1.0, 0.0 );
+        const double cos_angle = std::cos( p_angle );
+        const double sin_angle = std::sin( p_angle );
+        // Rodrigues: v cos + (a x v) sin + a (a . v)(1 - cos).
+        const math::Vec3 rotated = offset_d * cos_angle +
+                                   glm::cross( unit_axis, offset_d ) * sin_angle +
+                                   unit_axis * ( glm::dot( unit_axis, offset_d ) * ( 1.0 - cos_angle ) );
+        const math::Vec3 moved = pivot_d + rotated;
+        set_position( Vector3( static_cast<float>( moved.x ), static_cast<float>( moved.y ),
+                               static_cast<float>( moved.z ) ) );
 
         // Orientation: premultiply, exactly like the reference quaternion.premultiply.
+        const Quaternion rotation( p_axis.normalized(), static_cast<float>( p_angle ) );
         set_basis( Basis( rotation ) * get_basis() );
 
         sync_distance_from_camera();
@@ -963,14 +1104,35 @@ namespace tiles3d
 
     void GlobeCameraController::apply_orbit_drag( const double p_dx, const double p_dy )
     {
+        // Pivot: the planet centre, exactly as the reference does
+        // (initEvents: rotateCameraAround(new Vector3(0, 0, 0), up, deltaPhi)). This is the
+        // "spin the globe" gesture, and it behaves the same whether the cursor is over the globe
+        // or over empty space - dragging in space turns the Earth rather than swinging it around
+        // whatever happens to be under the pointer. The float32 cost of a 6.4e6 m pivot is paid
+        // inside rotate_camera_around, which does that arithmetic in double.
         const Vector3 pivot = resolve_pivot();
-        const double distance = ( get_position() - pivot ).length();
-        const double distance_ratio = distance / math::kWgs84MeanRadius;
-        const double motion_scale =
-            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
-        const double rotate_rate =
-            clampd( distance_ratio - 1.0, 1.0 / 20000.0, 1.77 ) * rotate_speed_scale_ *
-            motion_scale;
+        const double distance = static_cast<double>( ( get_position() - pivot ).length() );
+        const double altitude = camera_height_above_ellipsoid();
+
+        // Cursor-anchored transfer function.
+        //
+        // A rotation of dphi about the pivot slides the GROUND under the camera by
+        // r_ground * dphi, and the drag should slide it by the cursor's own screen fraction of the
+        // visible ground width, (dx/W) * 2*h*tan(fov/2)*aspect. So
+        //   dphi = (dx/W) * 2*h*tan(fov/2)*aspect / r_ground
+        // and the whole tuning problem is "what is r_ground". The reference hard-codes
+        // r_ground = R and approximates the viewport factor with 2*pi:
+        //   clamp(distance/MEAN_R - 1, 1/5000, 1.77) * ratio * 2*pi
+        // which is 2.1x the cursor at altitude, 7.8x at 49 m (distance - MEAN_R is not the
+        // altitude: at 34 N the geocentric surface radius sits 335 m above the mean) and 305x at
+        // 1 m, where the 1/5000 floor freezes the rate at a 5 km "virtual altitude" and stops
+        // tracking the camera at all. r_ground = R_local = distance - altitude and the real
+        // viewport angle are what make the ground track the cursor.
+        const double ground_radius = std::max( distance - altitude, 1.0 );
+        const double half_tan =
+            std::tan( static_cast<double>( get_fov() ) * ( 0.5 * math::kPi / 180.0 ) );
+        const double rate =
+            clampd( altitude / ground_radius, 0.0, kMaximumRotateRate ) * rotate_speed_scale_;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -982,17 +1144,13 @@ namespace tiles3d
         // with the polar angle clamped so the camera cannot flip over the pole.
         const Vector3 up = get_basis().get_column( 1 ).normalized();
         const double phi_ratio = std::min( -p_dx / width, kMaximumMovementRatio );
-        const double delta_phi = kHorizontalSign * rotate_rate * phi_ratio * 2.0 * math::kPi;
+        const double delta_phi =
+            kHorizontalSign * rate * ( width / height ) * half_tan * 2.0 * phi_ratio;
         rotate_camera_around( pivot, up, delta_phi );
 
-        const Vector3 relative = get_position() - pivot;
-        const double current_el = std::asin(
-            clampd( static_cast<double>( relative.y ) /
-                        std::max( static_cast<double>( relative.length() ), 1e-9 ),
-                    -1.0, 1.0 ) );
         const double theta_ratio = std::min( -p_dy / height, kMaximumMovementRatio );
-        double delta_theta = kVerticalSign * rotate_rate * theta_ratio * math::kPi;
-        delta_theta = clampd( current_el + delta_theta, -kElLimit, kElLimit ) - current_el;
+        const double delta_theta = clamp_polar_pitch(
+            pivot, kVerticalSign * rate * half_tan * 2.0 * theta_ratio );
 
         const Vector3 right = get_basis().get_column( 0 ).normalized();
         rotate_camera_around( pivot, right, delta_theta );
@@ -1027,10 +1185,14 @@ namespace tiles3d
                      static_cast<float>( pivot_local.z ) ) );
 
         const double rho = static_cast<double>( ( get_position() - pivot ).length() );
-        const double motion_scale =
-            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
+        // The reference's tilt rate, verbatim (QuadtreeGlobe.ts:470):
+        //   clamp(rho - 1.0, 1/5000, 1.77)
+        // rho is in metres, so the clamp is at its 1.77 ceiling for anything further than 2.77 m
+        // away - which is to say always. No altitude scaling is applied on top: the port used to
+        // multiply in an invented altitude_motion_scale(), and this gesture's speed is not
+        // something to invent.
         const double rotate_rate =
-            clampd( rho - 1.0, 1.0 / 5000.0, 1.77 ) * rotate_speed_scale_ * motion_scale;
+            clampd( rho - 1.0, 1.0 / 5000.0, 1.77 ) * rotate_speed_scale_;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -1041,13 +1203,14 @@ namespace tiles3d
         // Yaw about the pivot's geodetic surface normal (not the radial direction: on an
         // oblate ellipsoid they differ by up to ~0.19 deg, and the geodetic normal is what
         // keeps the horizon level while tilting). The surface normal of
-        // (x, y, z)_y-up / a^2 = 1 in scaled space is (x/a^2, y/a^2, z/b^2).
+        // x^2/a^2 + y^2/b^2 + z^2/a^2 = 1 in Y-up scaled space is (x/a^2, y/b^2, z/a^2) - Y is
+        // the polar axis here, exactly as in ellipsoid_offset().
         const double a = math::kWgs84SemiMajorAxis;
         const double b = math::kWgs84SemiMinorAxis;
         const glm::dvec3 normal_y_up =
             glm::normalize( glm::dvec3( tilt_pivot_ecef_.x / ( a * a ),
-                                        tilt_pivot_ecef_.y / ( a * a ),
-                                        tilt_pivot_ecef_.z / ( b * b ) ) );
+                                        tilt_pivot_ecef_.y / ( b * b ),
+                                        tilt_pivot_ecef_.z / ( a * a ) ) );
         // Y-up -> Z-up, then out to the parent space through the frame's linear part.
         const math::Vec3 normal_z_up( normal_y_up.x, -normal_y_up.z, normal_y_up.y );
         const math::Vec3 normal_local = globe_frame.rotate_local( normal_z_up );
@@ -1057,13 +1220,56 @@ namespace tiles3d
                                          .normalized();
 
         const double phi_ratio = std::min( -p_dx / width, kMaximumMovementRatio );
-        rotate_camera_around( pivot, yaw_axis,
-                              kTiltHorizontalSign * rotate_rate * phi_ratio * 2.0 * math::kPi );
-
-        const Vector3 right = get_basis().get_column( 0 ).normalized();
         const double theta_ratio = std::min( -p_dy / height, kMaximumMovementRatio );
-        rotate_camera_around( pivot, right,
-                              kTiltVerticalSign * rotate_rate * theta_ratio * math::kPi );
+
+        // The one clamp this gesture should have: the ground.
+        //
+        // A tilt pivots on a point ON the surface, so a long enough drag swings the camera under
+        // it. enforce_camera_above_ellipsoid() then pins the camera at 1 m, the distance to the
+        // pivot collapses from 800 m to a metre, and any further drag spins the view about that
+        // point instead of tilting it - which is what "it cannot keep rotating, the range is
+        // clamped" looks like from the outside. Measured before this: dragging up 320 px left the
+        // camera at 103 m and 640 px at 0.8 m, with the pivot off screen.
+        //
+        // So a step that would bury the camera is dropped rather than applied, and the gesture
+        // stops against the surface. By construction this can only ever bind near the ground - from
+        // altitude the same drag has thousands of metres to spend first - which is exactly where
+        // the user expects a limit and where the reference, never closer than its 42 km MIN_DIST,
+        // never has to think about it.
+        const auto step_guarded = [this, &pivot]( const Vector3 &p_axis, const double p_angle ) {
+            if ( p_angle == 0.0 )
+            {
+                return;
+            }
+            const Vector3 before_position = get_position();
+            const Basis before_basis = get_basis();
+            rotate_camera_around( pivot, p_axis, p_angle );
+            if ( camera_height_above_ellipsoid() < kMinCameraHeight )
+            {
+                set_position( before_position );
+                set_basis( before_basis );
+                sync_distance_from_camera();
+            }
+        };
+
+        step_guarded( yaw_axis, kTiltHorizontalSign * rotate_rate * phi_ratio * 2.0 * math::kPi );
+
+        // Vertical: about the camera's OWN RIGHT vector (QuadtreeGlobe.ts:477):
+        //   this.rotateCameraAround(center, this.getCameraRight(), deltaTheta);
+        //
+        // This is the line that decides the feel of the gesture. The port had been rotating about
+        // the surface tangent cross(up, pivot -> camera) instead, which is what the HTML prototype
+        // in cesium-middle-tilt-study.md §7.3 does - and that tangent is degenerate for a nadir
+        // camera (up and pivot->camera are parallel, the most common pose here) and flips sign as
+        // the view tilts, so the gesture read as inverted in some poses and correct in others. The
+        // camera's right is frame-independent and has one sign.
+        //
+        // With TILT_VERTICAL_SIGN = +1 and dy < 0 for an upward drag the angle is positive, and a
+        // positive rotation about the camera's right pitches the view up: the ground in front of
+        // the camera moves down the screen and the sphere tips away, which is the reference's
+        // behaviour and what the sign is chosen for.
+        step_guarded( get_basis().get_column( 0 ).normalized(),
+                      kTiltVerticalSign * rotate_rate * theta_ratio * math::kPi );
 
         enforce_camera_above_ellipsoid();
     }
@@ -1079,8 +1285,8 @@ namespace tiles3d
         const glm::dvec3 normal_y_up =
             offset.radius > 1e-6
                 ? glm::normalize( glm::dvec3( offset.offset_y_up.x / ( a * a ),
-                                              offset.offset_y_up.y / ( a * a ),
-                                              offset.offset_y_up.z / ( b * b ) ) )
+                                              offset.offset_y_up.y / ( b * b ),
+                                              offset.offset_y_up.z / ( a * a ) ) )
                 : glm::dvec3( 0.0, 1.0, 0.0 );
         const GlobeFrame &globe_frame = frame();
         const math::Vec3 normal_z_up( normal_y_up.x, -normal_y_up.z, normal_y_up.y );
@@ -1109,8 +1315,9 @@ namespace tiles3d
                               kTiltVerticalSign * rotate_rate * theta_ratio * math::kPi );
     }
 
-    bool GlobeCameraController::pick_ellipsoid_point( const godot::Vector2 &p_screen,
-                                                      math::Vec3 &out_ecef_y_up ) const
+    bool GlobeCameraController::screen_ray( const godot::Vector2 &p_screen,
+                                            math::Vec3 &out_origin_ecef_y_up,
+                                            math::Vec3 &out_direction_ecef_y_up ) const
     {
         const godot::Node3D *carrier = resolve_frame_node();
         if ( carrier == nullptr )
@@ -1138,10 +1345,22 @@ namespace tiles3d
                         static_cast<double>( tip_local.z ) ) );
         // Z-up -> Y-up (the same flip ellipsoid_offset uses), so the quadric is the
         // axis-aligned WGS84 ellipsoid.
-        const math::Vec3 origin( origin_ecef.x, origin_ecef.z, -origin_ecef.y );
-        const math::Vec3 direction( tip_ecef.x - origin_ecef.x,
-                                    tip_ecef.z - origin_ecef.z,
-                                    -( tip_ecef.y - origin_ecef.y ) );
+        out_origin_ecef_y_up = math::Vec3( origin_ecef.x, origin_ecef.z, -origin_ecef.y );
+        out_direction_ecef_y_up =
+            math::Vec3( tip_ecef.x - origin_ecef.x, tip_ecef.z - origin_ecef.z,
+                        -( tip_ecef.y - origin_ecef.y ) );
+        return true;
+    }
+
+    bool GlobeCameraController::pick_ellipsoid_point( const godot::Vector2 &p_screen,
+                                                      math::Vec3 &out_ecef_y_up ) const
+    {
+        math::Vec3 origin;
+        math::Vec3 direction;
+        if ( !screen_ray( p_screen, origin, direction ) )
+        {
+            return false;
+        }
 
         // Unit-sphere intersection in scaled space: |o' + t*d'| = 1. The t is the same in
         // both spaces because scaling is linear, but d' is NOT a unit vector (its length
@@ -1149,10 +1368,19 @@ namespace tiles3d
         // keep the full |d'|^2 coefficient - dividing it out was exactly the bug that made
         // every pick miss: with |d'| ~ 1e-7 the discriminant od^2 - |d'|^2*c collapsed to
         // -|d'|^2*c < 0 for any camera above the ellipsoid.
+        //
+        // The point is Y-UP (the permutation above), so its polar axis is Y and Y is the axis
+        // that pairs with the semi-minor radius b - the pairing ellipsoid_offset() uses. This
+        // used to pair Z with b (the Z-up ECEF convention) while the vector it was applied to had
+        // already been flipped to Y-up, which inflated the scaled radius by up to 1.2e-3 - 6.3 km
+        // of altitude at this latitude. t therefore came out as (camera altitude + 6269 m) at
+        // EVERY altitude, so the wheel zoom orbited a point 6.3 km away: at 20 m altitude one
+        // notch moved the camera 1.4 km, and the lateral component dragged it off the cursor.
+        // Measured before: focus distance = altitude + 6269 m, exactly, from 20 m to 200 km.
         const double a = math::kWgs84SemiMajorAxis;
         const double b = math::kWgs84SemiMinorAxis;
-        const math::Vec3 os( origin.x / a, origin.y / a, origin.z / b );
-        const math::Vec3 ds( direction.x / a, direction.y / a, direction.z / b );
+        const math::Vec3 os( origin.x / a, origin.y / b, origin.z / a );
+        const math::Vec3 ds( direction.x / a, direction.y / b, direction.z / a );
         const double ds_len2 = glm::dot( ds, ds );
         const double od = glm::dot( os, ds );
         const double c = glm::dot( os, os ) - 1.0;
@@ -1173,6 +1401,61 @@ namespace tiles3d
 
         out_ecef_y_up = math::Vec3( origin.x + direction.x * t, origin.y + direction.y * t,
                                     origin.z + direction.z * t );
+        return true;
+    }
+
+    bool GlobeCameraController::tilt_pivot( math::Vec3 &out_ecef_y_up ) const
+    {
+        // The reference's getTiltCenter: the pivot is the ground point under the SCREEN CENTRE -
+        // it intersects the ellipsoid along the camera's VIEW DIRECTION, not along the cursor.
+        // Reading the cursor instead is what made the globe swing off the centre of the screen
+        // while tilting, because the pivot was then a point the user had not aimed at.
+        const godot::Viewport *viewport = get_viewport();
+        const Vector2 screen_centre =
+            viewport != nullptr ? viewport->get_visible_rect().size * 0.5f
+                                : Vector2( 960.0f, 540.0f );
+
+        if ( pick_ellipsoid_point( screen_centre, out_ecef_y_up ) )
+        {
+            return true;
+        }
+
+        // Ray misses the planet. The reference only gives up below MINIMUM_TRACKBALL_HEIGHT
+        // (7.5e6 m); above it - the whole-globe viewpoint - it pivots on the ray's closest
+        // approach to the centre, projected onto the surface. Without that fallback a tilt from
+        // far out would silently become a free look, which is the one drag whose feel changes
+        // depending on how far away the camera happens to be.
+        if ( camera_height_above_ellipsoid() <= kMinimumTrackballHeight )
+        {
+            return false;
+        }
+
+        math::Vec3 origin;
+        math::Vec3 direction;
+        if ( !screen_ray( screen_centre, origin, direction ) )
+        {
+            return false;
+        }
+        const double a = math::kWgs84SemiMajorAxis;
+        const double b = math::kWgs84SemiMinorAxis;
+        const math::Vec3 os( origin.x / a, origin.y / b, origin.z / a );
+        const math::Vec3 ds( direction.x / a, direction.y / b, direction.z / a );
+        const double ds_len2 = glm::dot( ds, ds );
+        if ( ds_len2 <= 0.0 )
+        {
+            return false;
+        }
+        // Closest approach of the ray to the centre, then back out onto the ellipsoid along the
+        // same direction. Degenerate only if the ray passes through the centre itself.
+        const double t = std::max( 0.0, -glm::dot( os, ds ) / ds_len2 );
+        const math::Vec3 approach = os + ds * t;
+        const double length = glm::length( approach );
+        if ( length < 1e-12 )
+        {
+            return false;
+        }
+        const math::Vec3 surface = approach / length;
+        out_ecef_y_up = math::Vec3( surface.x * a, surface.y * b, surface.z * a );
         return true;
     }
 
@@ -1230,7 +1513,6 @@ namespace tiles3d
 
     void GlobeCameraController::update_drag_inertia( const double p_delta )
     {
-        (void)p_delta;
         if ( !inertia_enabled_ || left_dragging_ || mouse_up_time_ == 0.0 )
         {
             return;
@@ -1260,12 +1542,27 @@ namespace tiles3d
             return;
         }
 
+        // The glide replays the last drag event once per frame, so its total is `decay` summed
+        // over the frames that fit in one time constant - which is 1/dt of them. Multiplying by
+        // dt/tau makes the sum 1 whatever the frame rate: the glide is bounded by one more drag
+        // event's worth of travel. Without it the release of a 100 px flick carried the camera
+        // 15x the gesture at 60 fps and 36x at 146 fps (measured: 100 px at 5 km altitude moved
+        // 1.6 km while dragging and another 59 km after the button came up), which is the other
+        // half of "drag a tile and it is instantly far away".
+        const double tau = std::max( drag_inertia_coefficient_, 0.05 );
+        const double glide = decay * std::min( p_delta, 0.05 ) / tau;
+
+        // The same cursor-anchored transfer function and the same planet-centre pivot
+        // apply_orbit_drag uses: the release tail has to continue the gesture, not switch to a
+        // different law.
         const Vector3 pivot = resolve_pivot();
-        const double distance = ( get_position() - pivot ).length();
-        const double motion_scale =
-            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
-        const double rotate_rate = clampd( distance / math::kWgs84MeanRadius - 1.0, 1.0 / 20000.0, 1.77 ) *
-                                   rotate_speed_scale_ * motion_scale;
+        const double distance = static_cast<double>( ( get_position() - pivot ).length() );
+        const double altitude = camera_height_above_ellipsoid();
+        const double ground_radius = std::max( distance - altitude, 1.0 );
+        const double half_tan =
+            std::tan( static_cast<double>( get_fov() ) * ( 0.5 * math::kPi / 180.0 ) );
+        const double rotate_rate =
+            clampd( altitude / ground_radius, 0.0, kMaximumRotateRate ) * rotate_speed_scale_;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -1276,16 +1573,12 @@ namespace tiles3d
         const double phi_ratio = std::min( -last_drag_dx_ / width, kMaximumMovementRatio );
         const Vector3 up = get_basis().get_column( 1 ).normalized();
         rotate_camera_around( pivot, up,
-                              decay * kHorizontalSign * rotate_rate * phi_ratio * 2.0 * math::kPi );
+                              glide * kHorizontalSign * rotate_rate * ( width / height ) * half_tan *
+                                  2.0 * phi_ratio );
 
-        const Vector3 relative = get_position() - pivot;
-        const double current_el = std::asin(
-            clampd( static_cast<double>( relative.y ) /
-                        std::max( static_cast<double>( relative.length() ), 1e-9 ),
-                    -1.0, 1.0 ) );
         const double theta_ratio = std::min( -last_drag_dy_ / height, kMaximumMovementRatio );
-        double delta_theta = decay * kVerticalSign * rotate_rate * theta_ratio * math::kPi;
-        delta_theta = clampd( current_el + delta_theta, -kElLimit, kElLimit ) - current_el;
+        const double delta_theta = clamp_polar_pitch(
+            pivot, glide * kVerticalSign * rotate_rate * half_tan * 2.0 * theta_ratio );
         const Vector3 right = get_basis().get_column( 0 ).normalized();
         rotate_camera_around( pivot, right, delta_theta );
 
@@ -1377,6 +1670,13 @@ namespace tiles3d
         const Vector3 position = pivot + surface_direction * static_cast<float>( clamped_distance );
         set_position( position );
 
+        // The clamp above measures the surface with geodeticToYUp()'s geocentric radius; the
+        // keep-above test measures the scaled ellipsoid. At mid-latitudes those differ by ~31 m,
+        // which is enough for orbit_to to park the camera under the terrain - the demo's
+        // underground probe measured it. Run the clamp before aiming, so the aim is the one the
+        // drawn pose has.
+        enforce_camera_above_ellipsoid();
+
         // look_at takes a world-space target. `pivot` is expressed in this node's parent
         // space (that is the space resolve_ellipsoid_center works in), so convert through the
         // parent - calling to_global() on this node would treat pivot as camera-local and add
@@ -1393,7 +1693,7 @@ namespace tiles3d
             up = Vector3( 0.0f, 0.0f, 1.0f );
         }
         look_at( world_pivot, up );
-        distance_ = clamped_distance;
+        sync_distance_from_camera();
         fly_active_ = false;
     }
 
@@ -1487,6 +1787,14 @@ namespace tiles3d
         if ( t >= 1.0 )
         {
             fly_active_ = false;
+            // The target distance is expressed through geodeticToYUp()'s geocentric radius while
+            // the keep-above test uses the scaled ellipsoid, and the two disagree by up to ~31 m
+            // at mid-latitudes - so a flight that lands exactly where its own arithmetic says can
+            // still finish under the terrain. That is what "it flew below the ground" was. The
+            // clamp only runs here, on the last frame: running it every frame would fight the
+            // interpolation.
+            enforce_camera_above_ellipsoid();
+            sync_distance_from_camera();
         }
     }
 
@@ -1497,10 +1805,16 @@ namespace tiles3d
         const InputEventMouseButton *button = Object::cast_to<InputEventMouseButton>( p_event.ptr() );
         const InputEventMouseMotion *motion_event =
             Object::cast_to<InputEventMouseMotion>( p_event.ptr() );
-        // Only real interaction takes the camera back; a window that gains focus emits a
-        // hover motion with a zero delta, and cancelling on that killed flights at random.
+        // A flight is cancelled by a camera GESTURE, not by the mouse merely moving. The dataset
+        // picker starts its flight seconds after the click, once the load lands, and by then the
+        // hand is usually still drifting a pixel at a time - cancelling on any non-zero relative
+        // killed the flight the frame it began, which is what made switching datasets "often" not
+        // fly at all. A button (press or release) or a drag in progress is a real gesture; a
+        // window that gains focus emits a hover motion with a zero delta, which is not.
+        const bool dragging = left_dragging_ || right_dragging_;
         if ( button != nullptr ||
-             ( motion_event != nullptr && motion_event->get_relative().length_squared() > 0.0f ) )
+             ( motion_event != nullptr && dragging &&
+               motion_event->get_relative().length_squared() > 0.0f ) )
         {
             fly_active_ = false;
         }
@@ -1529,11 +1843,11 @@ namespace tiles3d
                     right_dragging_ = true;
                     last_mouse_position_ = button->get_position();
                     wheel_animating_ = false;
-                    // The reference picks the tilt pivot once per drag: the ellipsoid point
-                    // under the cursor at mousedown. Missing it (cursor over space) means
-                    // the whole drag is a free look instead.
-                    tilt_pivot_valid_ = pick_ellipsoid_point( last_mouse_position_,
-                                                              tilt_pivot_ecef_ );
+                    // The reference picks the tilt pivot once per drag, along the camera's view
+                    // direction (see tilt_pivot). Missing it - the ray misses the planet and the
+                    // camera is too low for the grazing fallback - means the whole drag is a free
+                    // look instead.
+                    tilt_pivot_valid_ = tilt_pivot( tilt_pivot_ecef_ );
                     tilt_looking_ = !tilt_pivot_valid_;
                 }
                 else

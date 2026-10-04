@@ -153,6 +153,20 @@ namespace tiles3d
         /// every content node with it. Returns false when there is no Georeference3D to move.
         bool shift_origin_now();
 
+        /// Moves the georeference ENU anchor to a geodetic position while keeping the camera
+        /// where it is RELATIVE TO THE EARTH.
+        ///
+        /// Every content node - the globe mesh, the imagery, the tilesets - is placed through the
+        /// frame, so moving the anchor re-places the whole planet: between continents that is
+        /// about 1e7 m of translation plus up to 180 degrees of rotation about the polar axis.
+        /// The camera is a sibling of the frame, so without this the planet simply teleports out
+        /// from under the viewer, and a dataset switch reads as a jump rather than as the flight
+        /// that follows it. Compensating the camera by the same rigid transform makes the move
+        /// invisible, exactly like shift_origin_now does for the automatic rebase.
+        ///
+        /// Returns false when there is no Georeference3D or no geodetic origin authority to move.
+        bool reanchor_preserving_view( double p_longitude_degrees, double p_latitude_degrees );
+
         /// How many times the origin has been moved since this node was created.
         int get_origin_shift_count() const;
 
@@ -212,11 +226,12 @@ namespace tiles3d
         bool right_dragging_ = false;
         godot::Vector2 last_mouse_position_;
 
-        // Right-drag tilt state, resolved once at mousedown like the reference: the ray
-        // through the cursor is intersected with the ellipsoid, and a hit becomes the
-        // pivot the whole drag tilts about. A miss (the cursor is on space) degrades the
-        // drag to a free look until the button is released. The pivot is kept in Y-up ECEF
-        // doubles - parent-space floats would quantise it to half-metre ticks.
+        // Right-drag tilt state, resolved once at mousedown like the reference: the pivot is the
+        // ground point under the SCREEN CENTRE - the reference reads it off the camera's view
+        // direction (getTiltCenter), not off the cursor - and the whole drag tilts about it.
+        // Reading the cursor instead is what made the globe swing away from the centre of the
+        // screen while tilting. The pivot is kept in Y-up ECEF doubles: parent-space floats would
+        // quantise it, and an origin shift between the press and the drag would invalidate them.
         bool tilt_looking_ = false;
         bool tilt_pivot_valid_ = false;
         math::Vec3 tilt_pivot_ecef_{};
@@ -247,6 +262,15 @@ namespace tiles3d
 
         godot::Vector3 resolve_pivot() const;
 
+        /// The right-drag tilt's pivot, in Y-up ECEF metres: the ground point under the SCREEN
+        /// CENTRE. The reference's getTiltCenter intersects the ellipsoid along the camera's view
+        /// direction, and when that ray misses the planet but the camera is above
+        /// kMinimumTrackballHeight it falls back to the ray's closest approach projected onto the
+        /// surface - so a tilt from far out still has a pivot instead of silently becoming a free
+        /// look. False only when neither is available (which is what upgrades the drag to
+        /// apply_look_drag).
+        bool tilt_pivot( math::Vec3 &out_ecef_y_up ) const;
+
         /// wheel_focus_ecef_ converted to the camera's parent space, re-derived per read
         /// (an origin shift can rebase between the pick and this read). Without a valid
         /// pick it falls back to the planet centre - the pre-port behaviour.
@@ -274,6 +298,11 @@ namespace tiles3d
         void enforce_camera_above_ellipsoid();
         void rotate_camera_around( const godot::Vector3 &p_pivot, const godot::Vector3 &p_axis,
                                    double p_angle );
+
+        /// `p_delta` (the pitch the drag asked for) limited so the camera's polar angle about
+        /// `p_pivot` stays inside the polar clamp. Zero in, zero out - see the definition for why
+        /// that matters here but not in the reference.
+        double clamp_polar_pitch( const godot::Vector3 &p_pivot, double p_delta ) const;
         void apply_orbit_drag( double p_dx, double p_dy );
         void apply_tilt_drag( double p_dx, double p_dy );
         void apply_look_drag( double p_dx, double p_dy );
@@ -284,6 +313,11 @@ namespace tiles3d
         /// frame, return false.
         bool pick_ellipsoid_point( const godot::Vector2 &p_screen,
                                    math::Vec3 &out_ecef_y_up ) const;
+
+        /// The ray through `p_screen` in Y-up ECEF metres (doubles). False when the scene has no
+        /// resolvable frame.
+        bool screen_ray( const godot::Vector2 &p_screen, math::Vec3 &out_origin_ecef_y_up,
+                         math::Vec3 &out_direction_ecef_y_up ) const;
         void update_zoom_easing( double p_delta );
         void update_drag_inertia( double p_delta );
         void update_fly( double p_delta );
