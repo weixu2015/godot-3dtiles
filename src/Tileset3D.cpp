@@ -27,6 +27,7 @@
 #include "godot_cpp/classes/sub_viewport.hpp"
 #endif
 #include "godot_cpp/classes/engine.hpp"
+#include "godot_cpp/classes/time.hpp"
 #include "godot_cpp/classes/file_access.hpp"
 #include "godot_cpp/classes/http_client.hpp"
 #include "godot_cpp/classes/mesh.hpp"
@@ -53,6 +54,15 @@
 
 namespace tiles3d
 {
+
+    /// Monotonic seconds, for the request deadline and the socket idle limit. Time::get_ticks_msec
+    /// is monotonic where OS::get_ticks_usec is wall-clock, and this is a duration, not a date.
+    double document_now_seconds()
+    {
+        const godot::Time *clock = godot::Time::get_singleton();
+        return clock != nullptr ? static_cast<double>( clock->get_ticks_msec() ) / 1000.0 : 0.0;
+    }
+
     using godot::Array;
     using godot::ArrayMesh;
     using godot::BaseMaterial3D;
@@ -1676,6 +1686,14 @@ namespace tiles3d
         return document_url( String( tile.content->uri.c_str() ) );
     }
 
+    void Tileset3D::drop_http_reuse() const
+    {
+        http_reuse_ = godot::Ref<godot::HTTPClient>();
+        http_reuse_host_ = godot::String();
+        http_reuse_port_ = -1;
+        http_reuse_last_use_ = -1e30;
+    }
+
     bool Tileset3D::read_document( const String &path, String &out_text,
                                    String &out_error ) const
     {
@@ -1692,7 +1710,7 @@ namespace tiles3d
     }
 
     bool Tileset3D::read_binary_document( const String &path, godot::PackedByteArray &out_bytes,
-                                          String &out_error ) const
+                                         String &out_error, const bool p_retried ) const
     {
         const std::string pathUtf8 = path.utf8().get_data();
 
@@ -1726,9 +1744,16 @@ namespace tiles3d
             // case.
             const godot::String host( parts.host.c_str() );
             godot::Ref<godot::HTTPClient> client;
+            // The idle limit is not paranoia, it is the other half of the "empty response body"
+            // story: a server closes an idle keep-alive socket on its own schedule (nginx's
+            // keepalive_timeout is 75 s by default), the client cannot see that until it writes to
+            // it, and then the request sits in STATUS_REQUESTING for ever. Reusing only a socket
+            // that has been used recently keeps that window shut for all but a genuine race.
+            const bool recently_used =
+                document_now_seconds() - http_reuse_last_use_ < kReuseIdleLimitSeconds;
             const bool reusable =
                 http_reuse_.is_valid() && http_reuse_host_ == host &&
-                http_reuse_port_ == parts.port &&
+                http_reuse_port_ == parts.port && recently_used &&
                 http_reuse_->get_status() == godot::HTTPClient::STATUS_CONNECTED;
             if ( reusable )
             {
@@ -1796,22 +1821,57 @@ namespace tiles3d
             // it back in pieces regardless.
             godot::PackedByteArray body;
             bool gotBody = false;
+            bool sawErrorStatus = false;
+            int errorCode = 0;
+            bool timedOut = false;
+            const double requestDeadline = document_now_seconds() + kDocumentRequestTimeoutSeconds;
 
             while ( client->get_status() == godot::HTTPClient::STATUS_REQUESTING ||
                     client->get_status() == godot::HTTPClient::STATUS_BODY )
             {
+                // A request on a socket the server has already closed never gets a response: the
+                // write succeeds into the dead connection and the client sits in STATUS_REQUESTING
+                // for ever. Without a deadline this loop is the hang; measured on the taiwan
+                // dataset, one such document used to spin until the traversal gave up on it.
+                if ( document_now_seconds() > requestDeadline )
+                {
+                    timedOut = true;
+                    break;
+                }
+
                 client->poll();
 
-                if ( !client->has_response() )
+                // Read the body only while there IS one, and keep polling while the request is
+                // still being written.
+                //
+                // The state to guard against is not "no response yet" but "the body is over":
+                // poll() takes the client out of STATUS_BODY the moment the last chunk is in (a
+                // Content-Length response goes straight to STATUS_DISCONNECTED), and reading then
+                // is an engine-level ERR_FAIL that prints
+                // `Condition "status != STATUS_BODY" is true` once per request - which is the
+                // editor's error flood on the first load. has_response() is not a substitute: it
+                // is also true in STATUS_DISCONNECTED, which is exactly when there is nothing
+                // left to read.
+                const godot::HTTPClient::Status status_after_poll = client->get_status();
+                if ( status_after_poll == godot::HTTPClient::STATUS_REQUESTING )
                 {
                     continue;
+                }
+                if ( status_after_poll != godot::HTTPClient::STATUS_BODY )
+                {
+                    break;
                 }
 
                 const int responseCode = client->get_response_code();
                 if ( responseCode < 200 || responseCode >= 300 )
                 {
-                    out_error = godot::vformat( "HTTP %d for '%s'", responseCode, path );
-                    return false;
+                    // Not an early return: the body still has to be read out. A keep-alive socket
+                    // is only reusable once its response has been consumed to the end, and leaving
+                    // an error page on it makes the NEXT request on that socket parse those bytes
+                    // as a status line - which is how a single 404 turned into every following
+                    // external tileset failing with an empty body.
+                    sawErrorStatus = true;
+                    errorCode = responseCode;
                 }
 
                 godot::PackedByteArray chunk = client->read_response_body_chunk();
@@ -1822,12 +1882,35 @@ namespace tiles3d
                 }
             }
 
+            if ( sawErrorStatus )
+            {
+                out_error = godot::vformat( "HTTP %d for '%s'", errorCode, path );
+                return false;
+            }
+
+            if ( timedOut )
+            {
+                // The socket is not reusable after a stalled request, and saying so is more use
+                // than "empty response body": the first tells the reader to look at keep-alive
+                // timeouts, the second looks like a parse bug.
+                drop_http_reuse();
+                out_error = godot::vformat( "timed out after %.0f s waiting for '%s'",
+                                            kDocumentRequestTimeoutSeconds, path );
+                return false;
+            }
+
             if ( !gotBody || body.size() == 0 )
             {
-                // Usually the server closed mid-response; the socket is not reusable.
-                http_reuse_ = godot::Ref<godot::HTTPClient>();
-                http_reuse_host_ = godot::String();
-                http_reuse_port_ = -1;
+                // A kept-alive socket the server closed between documents still accepts the
+                // request and never answers it - the write lands in a dead connection - which is
+                // the whole of "empty response body" here. Losing a document means losing the
+                // subtree under it, so this gets exactly one retry on a fresh connection; a file
+                // that is genuinely missing costs two attempts and then reports the real reason.
+                if ( !p_retried )
+                {
+                    drop_http_reuse();
+                    return read_binary_document( path, out_bytes, out_error, true );
+                }
                 out_error = godot::vformat( "empty response body for '%s'", path );
                 return false;
             }
@@ -1837,9 +1920,11 @@ namespace tiles3d
             // instead of trying to reuse a dead socket.
             if ( client->get_status() != godot::HTTPClient::STATUS_CONNECTED )
             {
-                http_reuse_ = godot::Ref<godot::HTTPClient>();
-                http_reuse_host_ = godot::String();
-                http_reuse_port_ = -1;
+                drop_http_reuse();
+            }
+            else
+            {
+                http_reuse_last_use_ = document_now_seconds();
             }
 
             out_bytes = body;

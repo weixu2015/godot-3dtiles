@@ -337,6 +337,14 @@ namespace tiles3d
                 return false;
             }
             client->poll();
+            // Same reason as the control-document path: poll() may have just taken the client out
+            // of STATUS_BODY (last chunk in, or the server closed the socket), and reading then
+            // makes the engine print `Condition "status != STATUS_BODY" is true`. At one line per
+            // tile that was the editor's error flood on the first load.
+            if ( client->get_status() != godot::HTTPClient::STATUS_BODY )
+            {
+                break;
+            }
             const godot::PackedByteArray chunk = client->read_response_body_chunk();
             if ( chunk.size() != 0 )
             {

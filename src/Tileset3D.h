@@ -260,13 +260,21 @@ namespace tiles3d
         /// Reads a whole document into memory. Synchronous, and only used for the small
         /// control files (tileset.json, .subtree) that have to be parsed before the tree
         /// exists; payloads go through the loader.
+        /// Forgets the kept-alive client, forcing the next document to reconnect. Const because the
+        /// reuse state is mutable and read_document() is const - the reuse is a cache, not part of
+        /// the node's value.
+        void drop_http_reuse() const;
+
         bool read_document( const godot::String &path, godot::String &out_text,
                             godot::String &out_error ) const;
 
         /// The byte-level half of read_document, covering both a local path and an http(s)
         /// URL. Kept separate because .subtree files are binary.
+        /// `p_retried` is the one-shot guard for the fresh-connection retry: a document is read
+        /// again at most once when the kept-alive socket turned out to be dead, so a genuinely
+        /// missing file costs two attempts instead of looping.
         bool read_binary_document( const godot::String &path, godot::PackedByteArray &out_bytes,
-                                   godot::String &out_error ) const;
+                                   godot::String &out_error, bool p_retried = false ) const;
 
         // Reused HTTP connection for the synchronous control-document fetches above. A
         // dataset switch reads the root document plus one document per external tileset
@@ -277,6 +285,17 @@ namespace tiles3d
         mutable godot::Ref<godot::HTTPClient> http_reuse_;
         mutable godot::String http_reuse_host_;
         mutable int http_reuse_port_ = -1;
+        /// When the kept-alive socket was last used, so a socket the server has probably closed in
+        /// the meantime is not reused. See the reuse check in read_document.
+        mutable double http_reuse_last_use_ = -1e30;
+
+        /// Ceiling on one control-document request. A request written into a socket the server has
+        /// already closed never gets a response and the client stays in STATUS_REQUESTING for
+        /// ever, so the poll loop needs a wall-clock bound rather than only a state test.
+        static constexpr double kDocumentRequestTimeoutSeconds = 8.0;
+        /// How long a kept-alive socket may sit unused before the next document reconnects
+        /// instead. Comfortably under a typical server keepalive timeout.
+        static constexpr double kReuseIdleLimitSeconds = 30.0;
 
         void release_content( core::Tile &tile );
 
