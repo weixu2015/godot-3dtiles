@@ -291,6 +291,50 @@ encode，地球整体提亮发白。因此 `demo/project.godot` **钉死
 作者化两种顶点域：**任何 RTC/顶点域改动都要回头补 shader 里所有世界/ECEF 运算**，漏一处
 就是棋盘格错位或整球平移 6.4e6 m。
 
+### 4.6 影像层：为什么它不叫 BingMapLayer，以及 WMS/TMS 怎么接
+
+**结论先说**：节点**不该**改名成 `BingMapLayer`。它现在叫 `GlobeTileLayer`，而"tile layer
+（栅格瓦片层）"与同级的 `Tileset3D`（3D Tiles）确实容易混 —— 但这是**命名不够清楚**，不是
+**绑定在 Bing 上**。`GlobeTileLayer` 里没有任何 Bing 专有逻辑：
+
+| 环节 | 现状 | 是否 provider 相关 |
+| ---- | ---- | ------------------ |
+| 四叉树 / 层级 1 根 / Web Mercator 行 | `mercatorY` + level-1 四根 | 通用（XYZ/TMS/ quadkey 共用） |
+| 细化判据 | screen space error + `imagery_missing` 门控 | 通用 |
+| 剔除 | 视锥 + 地平线（`isScaledSpacePointVisible`） | 通用 |
+| 裙边 | 按段角与 sagitta 生成 | 通用 |
+| **URL 拼装** | `tile_url()` 替换 `{z} {x} {y} {q}` | **唯一与 provider 有关的一处** |
+| **默认模板串** | `.../tiles/bing/{q}.jpeg?n=z&g=11404` | 只是个默认值 |
+
+`{q}`（Bing quadkey）与 `{z}/{x}/{y}`（slippy XYZ）是**并列的可选占位符**，模板里写哪个
+就走哪条路 —— OSM/Google 的 `{z}/{x}/{y}` 今天就能用，只要改 `url_template` ✓。所以真正
+Bing 味的只有那个**默认字符串**，它是默认值不是依赖。
+
+若要改名，唯一合理的方向是 provider 中性的、且与 3D Tiles 区分开的
+**`GlobeRasterLayer`**（或 `GlobeImageryLayer`）。叫 `BingMapLayer` 会把**最通用的那一层**
+钉死成某一家，而下一步恰恰是要接 WMS/TMS —— 名字会与目标自相矛盾。
+
+**扩展路线（按可验证的步子走，不要一次做完）**：
+
+1. **先抽地址层，行为不变**。把 `tile_url()` 里的替换逻辑抽成
+   `TileAddress{scheme, level, x, y, quadkey} → url`，节点加一个 `tile_scheme` 枚举，
+   **默认 `Quadkey`**（= 今天的行为）。验收：`grid_probe` 的层级直方图与 `u_uv_scale` 回退
+   分布必须逐项不变（当前基线：渭南近景 `{9:3, 10:4}`、`max_selected_level=10`、
+   `rendered=7`）。
+2. **加 XYZ 与 TMS**。XYZ 已有；TMS 只差一行 `y_tms = 2^z − 1 − y_xyz` ✓。两者都仍是
+   静态金字塔 ⇒ 404 门控照旧可用 ✓✓。这是最小的一步收益。
+3. **WMS 要换掉可用性判据**（这是唯一有设计难点的部分）：WMS **没有金字塔**，每片都是
+   独立的 `GetMap` ⇒ "404 ⇒ 子孙必 404" 这条推断**不成立** ⇒ 必须换成
+   **"这个 bbox 试过没有"的有界 LRU**（失败也记），否则每一帧都会重发同一批失败的 bbox。
+   同时：细化必须在 bbox 小于一个像素时停（用刚暴露的 `maximum_level` 兜底 ✓）；
+   `{bbox}/{width}/{height}/{crs}` 进模板；`EPSG:3857` 与 `EPSG:4326` 都是一行
+   （瓦片的地理矩形本来就在手上 ✓）。
+4. **请求预算与磁盘缓存**才是 WMS 的真正成本项：512 px 的 z12 覆盖一座城就是几千个
+   GetMap。复用本机既有的静态瓦片缓存（`127.0.0.1:9090` 那个）而不是新造一套 ✓。
+
+**WMS 特有的可选项**：`{time}` / `{dimensions}`（时序影像）、`pixelRatio` 提示、瓦片边长
+（256/512）、`styles`。它们都只是模板占位符 + 一个 header/参数表，**不要**进第一版。
+
 ---
 
 ## 5. 构建与测试
@@ -537,6 +581,8 @@ georeferenced。`Aerometrex-SanFrancisco-2cm` 的根是 `sphere`，其中心长�
 | D-18 | 渲染器                      | **钉死 `gl_compatibility`**（大气 display space 显式 encode，Forward+ 会双重 encode，见 §4.5） | 2026-10-04 |
 | D-19 | HTTP 连接                   | 控制文档 **keep-alive 复用**（`http_reuse_`），断开/换 host 才重建（见 §4.4）                | 2026-10-04 |
 | D-20 | 运行时 HUD                  | 程序化创建（`globe_hud.gd`），不做编辑器插件——运行窗口需要，编辑器不需要                     | 2026-10-04 |
+| D-21 | 影像层命名                  | **不叫 `BingMapLayer`**。该层无任何 Bing 专有逻辑，Bing 味只在默认 URL 模板；改名只应往 provider 中性走（`GlobeRasterLayer`），理由见 §4.6 | 2026-10-04 |
+| D-22 | 影像源扩展路线（WMS/TMS）    | **先抽地址层再加 scheme**：默认 `Quadkey` 保持现状 → XYZ/TMS 几乎零成本 → WMS 必须先换掉 404 门控（改为"试过没有"的有界 LRU），见 §4.6 | 2026-10-04 |
 
 **D-9 的理由**：Godot 自身以禁用 C++ 异常的方式构建；godot-cpp 的默认
 `GODOTCPP_DISABLE_EXCEPTIONS=ON` 会给消费者加 `_HAS_EXCEPTIONS=0`。在这条链接链上的库靠

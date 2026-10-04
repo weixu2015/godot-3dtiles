@@ -162,6 +162,10 @@ demo/drag_tile_probe.gd.uid
 # up slide the ground down (direction), and does the gesture keep rotating or pin against a limit.
 demo/tilt_dir_probe.gd
 demo/tilt_dir_probe.gd.uid
+# inspector_probe dumps ClassDB.class_get_property_list("Tileset3D") - the same list the
+# Inspector draws - and exercises maximum_level / suspend_update.
+demo/inspector_probe.gd
+demo/inspector_probe.gd.uid
 
 # Mipmap verification captures from the 2026-10-04 aliasing work: local evidence, not source.
 demo/mip_verify*.png
