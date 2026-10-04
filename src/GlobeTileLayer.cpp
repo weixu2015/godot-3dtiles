@@ -368,6 +368,10 @@ namespace tiles3d
             url_template_ = p_value;
             // Same imagery, different server: drop everything so tiles re-request.
             reload_tiles();
+            // Pointing at a different server is an explicit request to try it, so a pause left
+            // over from the previous one must not carry over.
+            consecutive_connect_failures_ = 0;
+            connect_pause_until_ = -1e30;
         }
     }
 
@@ -1165,6 +1169,21 @@ namespace tiles3d
 
     void GlobeTileLayer::process_load_queue()
     {
+        // Nothing to fetch from. An empty template is how a scene says "no imagery here", and it
+        // has to be checked here rather than at the call site: request("") fails, and a failing
+        // request is exactly the engine error this guard exists to avoid.
+        if ( url_template_.is_empty() )
+        {
+            return;
+        }
+
+        // The server was unreachable a moment ago (see the circuit breaker). Staying quiet for a
+        // few seconds is the difference between one line in the output and one per tile per frame.
+        if ( now_seconds() < connect_pause_until_ )
+        {
+            return;
+        }
+
         const double deadline = now_seconds() + 0.006; // 6 ms time slice, like the reference
         std::vector<GlobeTile *> *queues[2] = { &high_queue_, &medium_queue_ };
         for ( std::vector<GlobeTile *> *queue : queues )
@@ -1312,6 +1331,31 @@ namespace tiles3d
                             godot::String::num_int64( p_response_code ) + " url=" +
                             tile_url( *tile ) + " (report #" +
                             godot::String::num_int64( failure_report_count_ ) + ")" );
+            }
+
+            // Circuit breaker, on connection failures only. A 404 means the server answered and
+            // this quadkey is not cached - an answer, and the traversal's own imagery_missing gate
+            // handles it. No response code at all means nothing is listening, and that is the case
+            // worth stopping for: the engine's HTTPRequest logs one error per failed request and
+            // there is no way to throttle that from here, so the layer has to stop asking.
+            if ( p_response_code == 0 && p_result != kResultSuccess )
+            {
+                ++consecutive_connect_failures_;
+                if ( consecutive_connect_failures_ == kConnectFailureLimit )
+                {
+                    connect_pause_until_ = stamp + kConnectPauseSeconds;
+                    WARN_PRINT( "GlobeTileLayer: " +
+                                godot::String::num_int64( kConnectFailureLimit ) +
+                                " consecutive connection failures with no HTTP response - pausing "
+                                "imagery requests for " +
+                                godot::String::num( kConnectPauseSeconds, 1 ) +
+                                " s. The tile server at " + url_template_ +
+                                " is probably not running; the layer will retry on its own." );
+                }
+            }
+            else
+            {
+                consecutive_connect_failures_ = 0;
             }
         }
     }

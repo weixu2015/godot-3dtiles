@@ -193,6 +193,22 @@ namespace tiles3d
         int inflight_count_ = 0;
         double last_failure_report_ = -1e30;
         int failure_report_count_ = 0;
+
+        /// Circuit breaker for an unreachable tile server, counted over *connection* failures
+        /// only - a 404 is an answer, not an outage, and a partially populated cache legitimately
+        /// 404s a lot.
+        ///
+        /// It exists because of what a dead server looks like from inside the editor: the engine's
+        /// own HTTPRequest logs `Condition "status != STATUS_BODY" is true` once per failed
+        /// request, and that message cannot be throttled from here. With the layer dispatching
+        /// every visible tile every frame, a stopped local cache server turns the output into
+        /// hundreds of identical lines. After kConnectFailureLimit the layer stops dispatching
+        /// for kConnectPauseSeconds and says so once; the next dispatch after that is the probe
+        /// that finds the server back.
+        int consecutive_connect_failures_ = 0;
+        double connect_pause_until_ = -1e30;
+        static constexpr int kConnectFailureLimit = 3;
+        static constexpr double kConnectPauseSeconds = 5.0;
         double last_telemetry_stamp_ = -1e30;
         bool print_telemetry_ = false;
         bool manage_editor_clip_ = true;
