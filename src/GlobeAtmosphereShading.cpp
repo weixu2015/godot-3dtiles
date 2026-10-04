@@ -576,6 +576,12 @@ vec3 srgb_to_linear_approx(vec3 c) {
                     // offset, which is what a checkerboard of mismatched day/night and ground
                     // scattering looks like on screen.
                     "uniform vec3 u_tile_center = vec3(0.0);\n"
+                    // Globe3D's own surface mesh is authored directly in Y-up ECEF (see
+                    // Globe3D::rebuild_surface), so for that material VERTEX already *is*
+                    // ECEF and the frame matrix below must be skipped - applying it would
+                    // translate the vertices by the ellipsoid centre, i.e. off the planet.
+                    // Tiles keep the RTC + u_tile_center + frame-matrix path.
+                    "uniform bool u_ecef_vertices = false;\n"
                     "\n" +
                     String( kGlslAtmoCommon ) +
                     "\n"
@@ -589,12 +595,18 @@ vec3 srgb_to_linear_approx(vec3 c) {
                     // centre. Without this the two are ~6371 km apart and every length() in the
                     // raymarch is wrong by that much.
                     //
-                    // VERTEX alone is NOT that local space any more: the vertices are relative
-                    // to the tile centre (so an origin shift costs one transform write instead of
-                    // a re-authoring) and the centre rides on the node. Add it back - see
-                    // u_tile_center above.
-                    "    vec3 local_position = VERTEX + u_tile_center;\n"
-                    "    vec3 ecef = (globe_atmo_local_to_ecef_y_up * vec4(local_position, 1.0)).xyz;\n"
+                    // VERTEX alone is NOT that local space for tiles: the vertices are
+                    // relative to the tile centre (so an origin shift costs one transform
+                    // write instead of a re-authoring) and the centre rides on the node.
+                    // Add it back - see u_tile_center above. The globe's own surface is the
+                    // exception: its vertices are ECEF already (u_ecef_vertices).
+                    "    vec3 ecef;\n"
+                    "    if (u_ecef_vertices) {\n"
+                    "        ecef = VERTEX;\n"
+                    "    } else {\n"
+                    "        vec3 local_position = VERTEX + u_tile_center;\n"
+                    "        ecef = (globe_atmo_local_to_ecef_y_up * vec4(local_position, 1.0)).xyz;\n"
+                    "    }\n"
                     "    v_ecef_position = ecef;\n"
                     // Geometric normal, i.e. the true ellipsoid normal rather than the vertex
                     // direction. The tiles' own normals come from the mesh and are unreliable at

@@ -889,6 +889,11 @@ namespace tiles3d
         rebuild_graticule();
         rebuild_atmosphere();
         rebuild_sun();
+        // One placement covers all three ECEF-authored meshes. It must also run on the
+        // very first build: freshly created children sit at an identity transform, which
+        // would draw the surface around this node's origin (i.e. inside the ground) rather
+        // than at the frame's ellipsoid centre.
+        apply_ecef_y_up_placement();
         update_materials();
         // Force the visibility decision to be re-applied: rebuild() can be called from a
         // property setter, and set_show_surface() is not the only path that changes the
@@ -904,20 +909,18 @@ namespace tiles3d
         // node's copy has to go too or the rebase would be invisible to it.
         frame_resolved_ = false;
 
-        // Local-space geometry. No node transform to nudge: the vertices themselves are local
-        // coordinates, so they have to be re-derived. This is the expensive half of a rebase
-        // and the reason the controller's threshold is a distance rather than "every frame".
-        rebuild_surface();
-        rebuild_graticule();
-
-        // ECEF-space geometry. The shell's vertices are already in the units the scattering
-        // integral measures in and the node transform does the placing, so re-running the
-        // placement *is* the whole update - the mesh is not touched.
+        // Every mesh this node draws is authored in Y-up ECEF (see rebuild_surface), so an
+        // origin move touches none of them: ECEF coordinates are frame-independent by
+        // definition, and what changed is only where ECEF lands in local space. One
+        // transform write per child *is* the whole update - no SurfaceTool, no vertex
+        // rewrite, no GPU upload. The measured 32.85 ms median this replaces was the
+        // controller's origin-shift threshold being a distance rather than "every frame"
+        // for a reason that no longer exists.
         apply_ecef_y_up_placement();
 
         // Shading reads the frame and the viewer position, both of which just changed.
-        // update_atmosphere_uniforms() publishes the frame for the tile material as well, so a
-        // rebase does not leave one frame of atmosphere computed against the old origin.
+        // update_atmosphere_uniforms() publishes the frame for the tile material as well, so
+        // a rebase does not leave one frame of atmosphere computed against the old origin.
         update_atmosphere_uniforms();
     }
 
@@ -939,10 +942,6 @@ namespace tiles3d
         const int columns = radial_segments_;
         const int rows = rings_;
 
-        // Every vertex goes through the shared frame: kernel Z-up ECEF in, parent-space
-        // out. Under a Georeference3D that is the tileset frame; alone it is Y-up ECEF.
-        const GlobeFrame &frame = this->frame();
-
         // SurfaceTool derives from RefCounted, so it must be created through instantiate().
         // A stack instance trips godot-cpp's "created without binding callbacks" guard.
         Ref<SurfaceTool> tool;
@@ -959,7 +958,15 @@ namespace tiles3d
             const double latitude =
                 math::kPi / 2.0 - math::kPi * static_cast<double>( row ) /
                                       static_cast<double>( rows );
-            return frame.to_local( math::wgs84ToCartesian( longitude, latitude, 0.0 ) );
+            // Y-up ECEF metres, the same authoring space the atmosphere shell uses: the
+            // flip is the same (x, y, z) -> (x, z, -y) rotation (det = +1, so the winding
+            // below survives), and the node transform set by apply_ecef_y_up_placement()
+            // does the placing. Baking frame-local coordinates instead would make every
+            // origin move a full re-mesh; ECEF is frame-independent by definition, so a
+            // rebase costs one transform write.
+            const math::Vec3 ecef = math::wgs84ToCartesian( longitude, latitude, 0.0 );
+            return Vector3( static_cast<float>( ecef.x ), static_cast<float>( ecef.z ),
+                            static_cast<float>( -ecef.y ) );
         };
 
         const auto uv_at = [&]( const int column, const int row )
@@ -977,10 +984,10 @@ namespace tiles3d
                 const int next_row = row + 1;
 
                 // Quad corners, counter-clockwise seen from outside.
-                const Vector3 tl = toGodotVector( vertex_at( column, row ) );
-                const Vector3 tr = toGodotVector( vertex_at( next_column, row ) );
-                const Vector3 bl = toGodotVector( vertex_at( column, next_row ) );
-                const Vector3 br = toGodotVector( vertex_at( next_column, next_row ) );
+                const Vector3 tl = vertex_at( column, row );
+                const Vector3 tr = vertex_at( next_column, row );
+                const Vector3 bl = vertex_at( column, next_row );
+                const Vector3 br = vertex_at( next_column, next_row );
 
                 const Vector2 uv_tl = uv_at( column, row );
                 const Vector2 uv_tr = uv_at( next_column, row );
@@ -1035,7 +1042,16 @@ namespace tiles3d
         tool.instantiate();
         tool->begin( Mesh::PRIMITIVE_LINES );
 
-        const GlobeFrame &frame = this->frame();
+        // Same Y-up ECEF authoring as the surface (see rebuild_surface): the lines are
+        // placed by the node transform, never baked into the frame, so an origin move does
+        // not re-derive them.
+        const auto to_ecef_y_up = [&]( const double longitude, const double latitude,
+                                       const double height )
+        {
+            const math::Vec3 ecef = math::wgs84ToCartesian( longitude, latitude, height );
+            return Vector3( static_cast<float>( ecef.x ), static_cast<float>( ecef.z ),
+                            static_cast<float>( -ecef.y ) );
+        };
 
         const auto add_ring = [&]( const double latitude_degrees )
         {
@@ -1044,10 +1060,8 @@ namespace tiles3d
             {
                 const double lon0 = ( i - 180.0 ) * kDegreesToRadians;
                 const double lon1 = ( i + 1 - 180.0 ) * kDegreesToRadians;
-                tool->add_vertex( toGodotVector(
-                    frame.to_local( math::wgs84ToCartesian( lon0, latitude, kGraticuleAltitude ) ) ) );
-                tool->add_vertex( toGodotVector(
-                    frame.to_local( math::wgs84ToCartesian( lon1, latitude, kGraticuleAltitude ) ) ) );
+                tool->add_vertex( to_ecef_y_up( lon0, latitude, kGraticuleAltitude ) );
+                tool->add_vertex( to_ecef_y_up( lon1, latitude, kGraticuleAltitude ) );
             }
         };
 
@@ -1063,10 +1077,8 @@ namespace tiles3d
             {
                 const double lat0 = i * kDegreesToRadians;
                 const double lat1 = ( i + 1 ) * kDegreesToRadians;
-                tool->add_vertex( toGodotVector(
-                    frame.to_local( math::wgs84ToCartesian( longitude, lat0, kGraticuleAltitude ) ) ) );
-                tool->add_vertex( toGodotVector(
-                    frame.to_local( math::wgs84ToCartesian( longitude, lat1, kGraticuleAltitude ) ) ) );
+                tool->add_vertex( to_ecef_y_up( longitude, lat0, kGraticuleAltitude ) );
+                tool->add_vertex( to_ecef_y_up( longitude, lat1, kGraticuleAltitude ) );
             }
         };
 
@@ -1110,14 +1122,15 @@ namespace tiles3d
         // The shell's vertices are emitted in **Y-up ECEF**, and the node's own transform is
         // then set so that those coordinates land where they belong in the scene.
         //
-        // The alternative - baking each vertex straight into local space, the way the surface
-        // does - cannot work for this shader: the integral calls length(vertex) and expects
-        // metres from the Earth's *centre*, and a Georeference3D's local origin sits on the
-        // surface. Emitting ECEF and letting the transform place the shell satisfies both at
-        // once, with no per-vertex conversion, and it keeps the vertex values at Earth-radius
-        // magnitude (uniform for the float precision, and identical to what the reference
-        // feeds three.js).
-        apply_ecef_y_up_placement();
+        // The alternative - baking each vertex straight into local space - cannot work for
+        // this shader: the integral calls length(vertex) and expects metres from the Earth's
+        // *centre*, and a Georeference3D's local origin sits on the surface. Emitting ECEF
+        // and letting the transform place the shell satisfies both at once, with no
+        // per-vertex conversion, and it keeps the vertex values at Earth-radius magnitude
+        // (uniform for the float precision, and identical to what the reference feeds
+        // three.js). Placement is applied by rebuild()/rebase(), which now position the
+        // surface and the graticule through the same transform - this mesh has no special
+        // status any more, it was just the first one authored this way.
 
         Ref<SurfaceTool> tool;
         tool.instantiate();
@@ -1229,6 +1242,11 @@ namespace tiles3d
             material.instantiate();
             material->set_shader( GlobeAtmosphereShading::ground_shader() );
             material->set_shader_parameter( "u_has_texture", has_texture );
+            // This mesh's vertices are Y-up ECEF (see rebuild_surface), not frame-local the
+            // way the streamed tiles' RTC vertices are. The branch skips the frame matrix
+            // for this material only; leaving it off would translate every vertex by the
+            // ellipsoid centre and draw the ground pass six million metres underground.
+            material->set_shader_parameter( "u_ecef_vertices", true );
             if ( has_texture )
             {
                 material->set_shader_parameter( "u_albedo_texture", albedo_texture_ );
@@ -1361,7 +1379,7 @@ namespace tiles3d
 
     void Globe3D::apply_ecef_y_up_placement()
     {
-        if ( atmosphere_ == nullptr )
+        if ( surface_ == nullptr && graticule_ == nullptr && atmosphere_ == nullptr )
         {
             return;
         }
@@ -1397,8 +1415,27 @@ namespace tiles3d
                               static_cast<float>( origin_local.y ),
                               static_cast<float>( origin_local.z ) );
 
-        atmosphere_->set_transform( godot::Transform3D( godot::Basis( column_x, column_y, column_z ),
-                                                        origin ) );
+        const godot::Transform3D placement(
+            godot::Basis( column_x, column_y, column_z ), origin );
+
+        // All three ECEF-authored meshes share this one transform - this *is* the rebase:
+        // the meshes never move, the frame landing does. Three transform writes, no vertex
+        // touched, which is what turns the origin shift's dominant cost (the 31 ms
+        // SurfaceTool rebuild it replaced) into a rounding error. The sun is deliberately
+        // absent: it is a camera-pinned billboard placed via set_global_transform() every
+        // frame and has no ECEF geometry.
+        if ( surface_ != nullptr )
+        {
+            surface_->set_transform( placement );
+        }
+        if ( graticule_ != nullptr )
+        {
+            graticule_->set_transform( placement );
+        }
+        if ( atmosphere_ != nullptr )
+        {
+            atmosphere_->set_transform( placement );
+        }
     }
 
     Vector3 Globe3D::get_camera_ecef_y_up() const

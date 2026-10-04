@@ -74,25 +74,25 @@ lib/
 # worktree after a debugging session. They are not repository content: use demo/globe.tscn
 # for the real scene and tests/ for automated checks.
 #
-# Only the two that gate the floating-origin work are still around: origin_shift_probe
-# answers "is the jitter gone, and what does a rebase cost", precision_probe measures the
-# float32 step at the working magnitude. Both are the only way to re-verify that feature
-# after a change, so deleting them would leave the claim untestable. The rest of this family
-# (http_audit / globe_fly_audit / implicit_audit / camera_p3 / capture_globe / seam_probe /
-# switch_probe) has been removed - each had answered its question and none was referenced by
-# scripts/ or the docs.
+# Only the three that gate current work are still around: origin_shift_probe answers "is
+# the jitter gone, and what does a rebase cost", precision_probe measures the float32 step
+# at the working magnitude, dataset_switch_probe replays the demo's dataset switch with a
+# stopwatch on every stage (rebase cost, reload cost, worst frame). All are the only way to
+# re-verify their feature after a change, so deleting them would leave the claim untestable.
+# The rest of this family (http_audit / globe_fly_audit / implicit_audit / camera_p3 /
+# capture_globe / seam_probe / switch_probe) has been removed - each had answered its
+# question and none was referenced by scripts/ or the docs.
 demo/origin_shift_probe.gd
 demo/origin_shift_probe.gd.uid
 demo/precision_probe.gd
 demo/precision_probe.gd.uid
+demo/dataset_switch_probe.gd
+demo/dataset_switch_probe.gd.uid
+demo/atmo_workpoint_probe.gd
+demo/atmo_workpoint_probe.gd.uid
 
 # globe_capture is the one harness that survives as tracked content: scripts/globe_capture.ps1
 # runs res://globe_capture.tscn by path, and its env-gated negative controls (GLOBE_ZERO_TILE_CENTER,
 # GLOBE_NO_ORIGIN_SHIFT) are what proved the RTC shading fix. Its uid sidecar is
 # editor-generated noise rather than a matching pair - the editor regenerates it on next open.
 demo/*_audit.gd.uid
-# The origin-shift probe. Same category as the harnesses above - it hard-codes E:/GISData and
-# exists to answer one measured question about the floating origin (jitter removed? at what
-# cost?) rather than to be run by anything automated.
-demo/origin_shift_probe.gd
-demo/origin_shift_probe.gd.uid

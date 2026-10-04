@@ -189,17 +189,23 @@ namespace tiles3d
         /// Re-places everything this node draws after the shared frame's *origin* moved - the
         /// floating-origin primitive (see GlobeCameraController::shift_origin_now).
         ///
-        /// The two meshes split the work differently and this honours that split. The surface
-        /// and the graticule are baked straight into local coordinates, vertex by vertex, so a
-        /// moved origin means a new mesh and there is no node transform to nudge; the
-        /// atmosphere shell is authored in **Y-up ECEF** and placed by its own node transform,
-        /// so only that transform changes and its 12k vertices are untouched.
+        /// All three meshes (surface, graticule, atmosphere) are authored in **Y-up ECEF**,
+        /// so an origin move touches none of them: ECEF coordinates are frame-independent by
+        /// definition, and a rebase is a pure translation of the frame. What changes is only
+        /// where the ECEF space lands in this node's local space, so rebase() is one
+        /// transform write per mesh - O(1), no SurfaceTool, no vertex rewrite, no GPU
+        /// upload. The measured 31 ms SurfaceTool rebuild this replaces dominated every
+        /// origin shift.
         ///
-        /// Rebuilding is the honest price of authoring in local space - and authoring in local
-        /// space is the whole point, because it is what keeps the vertices next to the camera
-        /// small. The alternative (emitting ECEF and letting a node transform place the mesh)
-        /// trades the rebuild for a constant ~6371 km vertex magnitude, which is the 0.38 m
-        /// quantisation the rebase exists to avoid.
+        /// The price is paid once, at authoring time: the vertices sit at Earth-radius
+        /// magnitude (~6.4e6 m), where one float32 step is ~0.5 m, so the *smooth* ellipsoid
+        /// is drawn on a half-metre grid everywhere instead of being exact near the camera
+        /// and coarse on the far side. For a featureless sphere at the distances where it is
+        /// actually visible (the surface hides itself while tiles stream - see
+        /// set_show_surface) that is far below a pixel, and the atmosphere shell made the
+        /// same trade from day one. Datasets keep the precise regime: GlobeTileLayer authors
+        /// its tiles relative to their own centres, so content near the camera stays on the
+        /// finest grid the hardware offers.
         void rebase();
 
         /// Resolves show_surface_ against the current tile state and applies it. Called
@@ -360,9 +366,10 @@ namespace tiles3d
         /// finite answer rather than a NaN.
         godot::Vector3 get_camera_ecef_y_up() const;
 
-        /// Positions the Atmosphere child so that geometry emitted in Y-up ECEF lands
-        /// correctly, given the shared frame this node resolved. Re-run on every rebuild and
-        /// whenever the frame may have moved.
+        /// Positions the three ECEF-authored children (surface, graticule, atmosphere) so
+        /// that their Y-up ECEF geometry lands correctly, given the shared frame this node
+        /// resolved. This *is* the whole rebase: one transform write per mesh, and the one
+        /// call every frame-move path goes through. Idempotent.
         void apply_ecef_y_up_placement();
 
         void update_atmosphere_uniforms();

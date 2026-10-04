@@ -21,8 +21,10 @@
 #include "core/tiles/Tile.h"
 #include "core/tiles/TilesetJson.h"
 
+#include "godot_cpp/classes/http_client.hpp"
 #include "godot_cpp/classes/mesh_instance3d.hpp"
 #include "godot_cpp/classes/node3d.hpp"
+#include "godot_cpp/classes/ref.hpp"
 #include "godot_cpp/variant/string.hpp"
 #include "godot_cpp/variant/vector3.hpp"
 
@@ -254,6 +256,16 @@ namespace tiles3d
         /// URL. Kept separate because .subtree files are binary.
         bool read_binary_document( const godot::String &path, godot::PackedByteArray &out_bytes,
                                    godot::String &out_error ) const;
+
+        // Reused HTTP connection for the synchronous control-document fetches above. A
+        // dataset switch reads the root document plus one document per external tileset
+        // (31 on the weinan set); a fresh TCP connection per document measured ~9 ms each
+        // (~270 ms of the switch hitch) against ~2 ms over a kept-alive one. mutable
+        // because read_binary_document is const; invalidated by host/port change or by a
+        // dead status, rebuilt on the next call.
+        mutable godot::Ref<godot::HTTPClient> http_reuse_;
+        mutable godot::String http_reuse_host_;
+        mutable int http_reuse_port_ = -1;
 
         void release_content( core::Tile &tile );
 

@@ -85,6 +85,12 @@ func _ready() -> void:
 	_aim_sun()
 	_update_status()
 
+	# Runtime debug HUD, bottom-right, F3 to toggle. The editor's viewport_hud addon cannot
+	# exist in a running game, and the numbers worth watching during a run (origin-shift
+	# cost, in-flight tiles, draw calls) are exactly the ones nothing else shows.
+	if not Engine.is_editor_hint():
+		preload("res://globe_hud.gd").create(self, self)
+
 # ---- dataset picker ----------------------------------------------------------------------
 
 func _select_picker_for_url(url: String) -> void:
@@ -111,10 +117,12 @@ func _on_dataset_selected(index: int) -> void:
 	_pending_flight = true
 	_switch_deadline_ms = Time.get_ticks_msec() + int(SWITCH_TIMEOUT_SECONDS * 1000.0)
 	_status.text = "loading %s ..." % entry["label"]
+	# set_url() reloads internally whenever the URL actually changes, so an explicit
+	# reload() here ran the whole load twice - two synchronous passes over the root
+	# document plus every external tileset, which was most of the switch hitch (the
+	# probe measured two ~0.65 s loads inside one 1.3 s stage). The branch above already
+	# handles the same-URL pick, so reaching this line guarantees the internal reload fires.
 	_tileset.set_url(wanted)
-	# reload() rather than load(): load() on a live tileset would keep the old tree around
-	# while the new document streams in, and the two would both be reported as loaded.
-	_tileset.reload()
 
 func _on_tileset_loaded() -> void:
 	if not _pending_flight:
@@ -183,13 +191,13 @@ func _rebase_to_dataset() -> void:
 	authority.set("latitude", lat)
 	authority.set("height", 0.0)
 
-	# Both layers bake the frame into their vertex positions, so a moved origin is only picked
-	# up when their meshes are rebuilt: the globe caches the resolved frame (rebuild()
-	# re-resolves it) and the imagery is only meshed on tile creation (reload_tiles() throws
-	# the tree away and re-creates it).
+	# The globe's meshes are authored in Y-up ECEF and placed by a node transform, so a moved
+	# origin costs it one rebase() (three transform writes - the frame landing moved, the
+	# meshes did not). The imagery still bakes the frame into its vertices at tile creation
+	# time, so it is only picked up when the tree is re-created (reload_tiles()).
 	var globe := get_node_or_null("Georeference3D/Globe3D")
 	if globe != null:
-		globe.call("rebuild")
+		globe.call("rebase")
 		await get_tree().process_frame
 
 	var layer := get_node_or_null("Georeference3D/GlobeTileLayer")
