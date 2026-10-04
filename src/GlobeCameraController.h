@@ -268,6 +268,14 @@ namespace tiles3d
         /// Closest the camera may get to the ellipsoid centre (just above the polar radius).
         static double min_distance();
 
+        /// Closest the wheel zoom may pull the camera in: the *local* surface radius under
+        /// the camera's current radial direction plus kMinCameraHeight. min_distance() is the
+        /// polar radius times 1.01, which is a 63 km floor anywhere else on the planet - that
+        /// floor is what made the globe impossible to zoom all the way in on. The zoom and
+        /// the keep-above clamp (enforce_camera_above_ellipsoid) must agree, and they now do:
+        /// both bottom out 1 m above the surface.
+        double zoom_min_distance() const;
+
         /// Furthest the camera may orbit: eight earth radii, the reference MAX_DIST.
         static double max_distance();
     };

@@ -383,10 +383,14 @@ namespace tiles3d
 
         bool show_sun_ = true;
         double sun_angular_scale_ = 1.0;
-        // NaN means "derive from the clock". A sentinel rather than a separate bool because
-        // the override is read every frame and must not need a rebuild to toggle.
-        double sun_longitude_degrees_ = std::numeric_limits<double>::quiet_NaN();
-        double sun_latitude_degrees_ = std::numeric_limits<double>::quiet_NaN();
+        // The sub-solar overrides used to be NaN sentinels ("NaN = derive from the clock"),
+        // but Godot diffs properties against the default before saving and NaN != NaN is
+        // always true - so every scene save wrote a `nan` entry into the .tscn. The override
+        // is now an explicit flag and the values are ordinary numbers that diff normally.
+        bool has_sun_longitude_override_ = false;
+        bool has_sun_latitude_override_ = false;
+        double sun_longitude_degrees_ = 0.0;
+        double sun_latitude_degrees_ = 0.0;
 
         godot::MeshInstance3D *surface_ = nullptr;
         godot::MeshInstance3D *graticule_ = nullptr;

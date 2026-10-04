@@ -123,6 +123,23 @@ namespace tiles3d
             return value < low ? low : ( value > high ? high : value );
         }
 
+        /// Altitude-adaptive motion scale for zoom and rotate.
+        ///
+        /// A fixed log-space zoom step (1.22x per notch) and the reference's rotate curve are
+        /// tuned for planetary viewing; near the surface the same gestures read as "one tick
+        /// and I am back in space, one flick and I am on another continent". The reference
+        /// gets away with it because its inertia masks the coarseness; ours is tuned tighter,
+        /// which exposes it. The scale falls with the camera's height above the ellipsoid:
+        /// full speed at 10 km and above, ~0.5 at 100 m, ~0.15 near the ground - so each
+        /// notch/drag pixel keeps shrinking with the altitude instead of staying constant.
+        /// `rotate_speed_scale` / `zoom_speed_scale` remain the user-facing multipliers on
+        /// top of this.
+        double altitude_motion_scale( const double height_m )
+        {
+            const double decades = std::log10( std::max( height_m, 1.0 ) );
+            return clampd( decades / 4.0, 0.15, 1.0 );
+        }
+
         /// The reference `inertiaDecay`: exponential fade over time.
         double inertia_decay( const double time_seconds, const double coefficient )
         {
@@ -403,6 +420,32 @@ namespace tiles3d
     double GlobeCameraController::max_distance()
     {
         return math::kWgs84MeanRadius * 8.0;
+    }
+
+    double GlobeCameraController::zoom_min_distance() const
+    {
+        // The surface radius directly below the camera (its radial direction picks the
+        // geocentric latitude, and the ellipsoid radius at that latitude is
+        // a*b / sqrt((b*cos)^2 + (a*sin)^2)), plus the same 1 m floor the keep-above
+        // clamp enforces. Clamping the zoom to min_distance() instead is what capped every
+        // approach at 63 km of altitude: the polar radius times 1.01 only touches the
+        // surface at the poles.
+        const Vector3 pivot = resolve_pivot();
+        Vector3 radial = get_position() - pivot;
+        const double length = static_cast<double>( radial.length() );
+        if ( length < 1e-6 )
+        {
+            return min_distance();
+        }
+        const double sin_latitude =
+            clampd( static_cast<double>( radial.y ) / length, -1.0, 1.0 );
+        const double cos_latitude = std::sqrt( 1.0 - sin_latitude * sin_latitude );
+        const double a = math::kWgs84SemiMajorAxis;
+        const double b = math::kWgs84SemiMinorAxis;
+        const double surface_radius =
+            a * b / std::sqrt( ( b * cos_latitude ) * ( b * cos_latitude ) +
+                               ( a * sin_latitude ) * ( a * sin_latitude ) );
+        return surface_radius + kMinCameraHeight;
     }
 
     const GlobeFrame &GlobeCameraController::frame() const
@@ -941,8 +984,11 @@ namespace tiles3d
         const Vector3 pivot = resolve_pivot();
         const double distance = ( get_position() - pivot ).length();
         const double distance_ratio = distance / math::kWgs84MeanRadius;
+        const double motion_scale =
+            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
         const double rotate_rate =
-            clampd( distance_ratio - 1.0, 1.0 / 5000.0, 1.77 ) * rotate_speed_scale_;
+            clampd( distance_ratio - 1.0, 1.0 / 20000.0, 1.77 ) * rotate_speed_scale_ *
+            motion_scale;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -977,8 +1023,10 @@ namespace tiles3d
         // so the two feel alike.
         const Vector3 pivot = resolve_pivot();
         const double rho = ( get_position() - pivot ).length();
+        const double motion_scale =
+            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
         const double rotate_rate =
-            clampd( rho - 1.0, 1.0 / 5000.0, 1.77 ) * rotate_speed_scale_;
+            clampd( rho - 1.0, 1.0 / 20000.0, 1.77 ) * rotate_speed_scale_ * motion_scale;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -1013,7 +1061,7 @@ namespace tiles3d
         const double dt = std::min( p_delta, 0.05 );
         const double damping = std::max( zoom_inertia_damping_, 0.1 );
         wheel_log_distance_ += wheel_log_velocity_ * dt * zoom_speed_scale_;
-        wheel_log_distance_ = std::max( wheel_log_distance_, std::log( min_distance() ) );
+        wheel_log_distance_ = std::max( wheel_log_distance_, std::log( zoom_min_distance() ) );
         wheel_log_velocity_ *= std::exp( -damping * dt );
 
         const double distance = std::exp( wheel_log_distance_ );
@@ -1061,8 +1109,10 @@ namespace tiles3d
 
         const Vector3 pivot = resolve_pivot();
         const double distance = ( get_position() - pivot ).length();
-        const double rotate_rate = clampd( distance / math::kWgs84MeanRadius - 1.0, 1.0 / 5000.0, 1.77 ) *
-                                   rotate_speed_scale_;
+        const double motion_scale =
+            altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
+        const double rotate_rate = clampd( distance / math::kWgs84MeanRadius - 1.0, 1.0 / 20000.0, 1.77 ) *
+                                   rotate_speed_scale_ * motion_scale;
 
         godot::Viewport *viewport = get_viewport();
         const double width =
@@ -1159,7 +1209,15 @@ namespace tiles3d
                      static_cast<float>( direction_local.y ),
                      static_cast<float>( direction_local.z ) ) );
 
-        const Vector3 position = pivot + surface_direction * static_cast<float>( p_distance );
+        // Clamp like fly_to() does. A raw set_position() here let a distance below the local
+        // surface radius park the camera *inside* the planet - orbit_to bypassed the clamp
+        // that set_distance() and enforce_camera_above_ellipsoid() apply on other paths.
+        const double surface_distance =
+            glm::length( math::geodeticToYUp( longitude, latitude, 0.0 ) );
+        const double clamped_distance =
+            clampd( p_distance, surface_distance + kMinCameraHeight, max_distance() );
+
+        const Vector3 position = pivot + surface_direction * static_cast<float>( clamped_distance );
         set_position( position );
 
         // look_at takes a world-space target. `pivot` is expressed in this node's parent
@@ -1178,7 +1236,7 @@ namespace tiles3d
             up = Vector3( 0.0f, 0.0f, 1.0f );
         }
         look_at( world_pivot, up );
-        distance_ = p_distance;
+        distance_ = clamped_distance;
         fly_active_ = false;
     }
 
@@ -1333,9 +1391,12 @@ namespace tiles3d
                                             ? 1.0
                                             : -1.0;
                     const double distance = ( get_position() - pivot ).length();
+                    const double motion_scale = altitude_motion_scale(
+                        std::max( camera_height_above_ellipsoid(), 1.0 ) );
                     const double next =
-                        clampd( distance * std::exp( -step * 0.15 * zoom_speed_scale_ ),
-                                min_distance(), max_distance() );
+                        clampd( distance * std::exp( -step * 0.15 * zoom_speed_scale_ *
+                                                     motion_scale ),
+                                zoom_min_distance(), max_distance() );
                     set_position( pivot + radial * static_cast<float>( next ) );
                     sync_distance_from_camera();
                     return;
@@ -1344,7 +1405,7 @@ namespace tiles3d
                 const double current = ( get_position() - pivot ).length();
                 if ( !wheel_animating_ )
                 {
-                    wheel_log_distance_ = std::log( std::max( current, min_distance() ) );
+                    wheel_log_distance_ = std::log( std::max( current, zoom_min_distance() ) );
                     wheel_log_velocity_ = 0.0;
                     wheel_animating_ = true;
                 }
@@ -1353,9 +1414,17 @@ namespace tiles3d
                 const double direction = button->get_button_index() == MOUSE_BUTTON_WHEEL_UP ? -1.0 : 1.0;
                 // Scaling by the damping is what keeps the travelled distance independent of
                 // it: the integrator divides velocity back out over the exponential tail.
+                // The altitude scale shrinks the per-notch step near the surface the same way
+                // it shrinks a drag step, so a flick cannot throw the camera back to orbit.
                 const double damping = std::max( zoom_inertia_damping_, 0.1 );
+                const double motion_scale =
+                    altitude_motion_scale( std::max( camera_height_above_ellipsoid(), 1.0 ) );
                 const double max_velocity = kMaxFlickLogTravel * damping;
-                wheel_log_velocity_ += direction * kLogDistancePerNotch * damping;
+                // zoom_speed_scale_ is deliberately NOT folded in here: the integrator
+                // multiplies it out every frame (update_zoom_easing), so adding it here too
+                // would square the user's multiplier.
+                wheel_log_velocity_ +=
+                    direction * kLogDistancePerNotch * damping * motion_scale;
                 wheel_log_velocity_ =
                     clampd( wheel_log_velocity_, -max_velocity, max_velocity );
                 wheel_last_time_ = Time::get_singleton()->get_ticks_msec() / 1000.0;

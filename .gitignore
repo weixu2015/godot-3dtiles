@@ -90,6 +90,8 @@ demo/dataset_switch_probe.gd
 demo/dataset_switch_probe.gd.uid
 demo/atmo_workpoint_probe.gd
 demo/atmo_workpoint_probe.gd.uid
+demo/camera_probe.gd
+demo/camera_probe.gd.uid
 
 # globe_capture is the one harness that survives as tracked content: scripts/globe_capture.ps1
 # runs res://globe_capture.tscn by path, and its env-gated negative controls (GLOBE_ZERO_TILE_CENTER,

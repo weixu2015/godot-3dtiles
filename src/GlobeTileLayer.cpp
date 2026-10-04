@@ -1220,6 +1220,15 @@ namespace tiles3d
             }
             if ( decode_error == godot::Error::OK )
             {
+                // Mipmaps are what makes an under-resolved tile read as a smooth blur instead
+                // of a checkerboard: when the camera is close to the 3D Tiles dataset the
+                // background imagery is still low-LOD, and without a mip chain every texel
+                // aliases at screen scale - adjacent tiles then show hard colour boundaries
+                // (the "mosaic" look). This mirrors what Cesium gets from GPU-side
+                // generateMipmap; Godot needs the chain baked into the Image up front and a
+                // mipmap-capable sampler on the shader side (filter_linear_mipmap in
+                // GlobeAtmosphereShading).
+                image->generate_mipmaps();
                 tile->texture = ImageTexture::create_from_image( image );
                 tile->renderable = true;
                 tile->state = GlobeTile::LoadState::DONE;

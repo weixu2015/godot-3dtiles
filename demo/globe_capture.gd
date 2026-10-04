@@ -130,6 +130,20 @@ func _ready() -> void:
 							str(tmat.get_shader_parameter("u_uv_scale")),
 							str(tmat.get_shader_parameter("u_uv_offset")),
 							str(tmat.shader != null)])
+						# Mipmap chain audit: without a full mip chain the low-LOD imagery
+						# magnifies into hard-edged mosaic blocks (the Cesium-style blur
+						# requires CPU generate_mipmaps + a filter_linear_mipmap sampler).
+						var albedo: Texture2D = tmat.get_shader_parameter("u_albedo_texture")
+						if albedo != null:
+							var tex_img: Image = albedo.get_image()
+							if tex_img != null:
+								print("ground: TILE albedo has_mipmaps=%s  mip_count=%d  size=%s" % [
+									str(tex_img.has_mipmaps()), tex_img.get_mipmap_count(),
+									str(tex_img.get_size())])
+							else:
+								print("ground: TILE albedo readback failed")
+						else:
+							print("ground: TILE albedo texture is null")
 		print("ground: %d tile ShaderMaterials, %d with imagery" % [probed, textured])
 		# Negative control for the RTC offset.
 		#

@@ -94,10 +94,10 @@ TEST_CASE( "plain primitive: float positions, u16 indices, texcoords and materia
             "material": 0
         }]}],
         "accessors": [
-            {"componentType": 5123, "count": 3, "type": "SCALAR"},
-            {"componentType": 5126, "count": 3, "type": "VEC3",
+            {"componentType": 5123, "count": 3, "type": "SCALAR", "bufferView": 0},
+            {"componentType": 5126, "count": 3, "type": "VEC3", "bufferView": 1,
              "min": [0,0,0], "max": [1,1,0]},
-            {"componentType": 5126, "count": 3, "type": "VEC2"}
+            {"componentType": 5126, "count": 3, "type": "VEC2", "bufferView": 2}
         ],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0,  "byteLength": 6},
@@ -164,8 +164,9 @@ TEST_CASE( "normalized UByte COLOR_0 is scaled to 0..1 and RGB expands to RGBA" 
         "nodes": [{"mesh": 0}],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "COLOR_0": 1}}]}],
         "accessors": [
-            {"componentType": 5126, "count": 2, "type": "VEC3"},
-            {"componentType": 5121, "count": 2, "type": "VEC3", "normalized": true}
+            {"componentType": 5126, "count": 2, "type": "VEC3", "bufferView": 0},
+            {"componentType": 5121, "count": 2, "type": "VEC3", "bufferView": 1,
+             "normalized": true}
         ],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": 24},
@@ -213,7 +214,7 @@ TEST_CASE( "node transforms: matrix passthrough and TRS composition" )
             {"mesh": 0, "matrix": [1,0,0,0, 0,1,0,0, 0,0,1,0, 5,6,7,1]}
         ],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
-        "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3"}],
+        "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3", "bufferView": 0}],
         "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 12}],
         "buffers": [{"byteLength": 12}]
     })";
@@ -254,13 +255,13 @@ TEST_CASE( "TRIANGLE_STRIP expands to triangles with alternating winding" )
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0}],
         "meshes": [{"primitives": [{
-            "attributes": {"POSITION": 0},
+            "attributes": {"POSITION": 1},
             "indices": 0,
             "mode": 5
         }]}],
         "accessors": [
-            {"componentType": 5123, "count": 4, "type": "SCALAR"},
-            {"componentType": 5126, "count": 4, "type": "VEC3"}
+            {"componentType": 5123, "count": 4, "type": "SCALAR", "bufferView": 0},
+            {"componentType": 5126, "count": 4, "type": "VEC3", "bufferView": 1}
         ],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": 8},
@@ -275,7 +276,8 @@ TEST_CASE( "TRIANGLE_STRIP expands to triangles with alternating winding" )
 
     GltfModel model;
     std::string error;
-    CHECK( parseGltfModel( buildGlb( json, bin ), model, error ) );
+    const bool parsed = parseGltfModel( buildGlb( json, bin ), model, error );
+    CHECK( parsed );
     if ( model.primitives.size() != 1u )
     {
         return;
@@ -303,6 +305,7 @@ TEST_CASE( "documented failure paths fail with a named reason" )
             "nodes": [{"mesh": 0}],
             "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
             "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3",
+                           "bufferView": 0,
                            "sparse": {"count": 1}}],
             "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 12}],
             "buffers": [{"byteLength": 12}]
@@ -322,7 +325,7 @@ TEST_CASE( "documented failure paths fail with a named reason" )
             "scenes": [{"nodes": [0]}],
             "nodes": [{"mesh": 0}],
             "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
-            "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3"}],
+            "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3", "bufferView": 0}],
             "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 12}],
             "buffers": [{"uri": "geometry.bin", "byteLength": 12}]
         })";
@@ -341,7 +344,7 @@ TEST_CASE( "documented failure paths fail with a named reason" )
             "scenes": [{"nodes": [0]}],
             "nodes": [{"mesh": 0}],
             "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "mode": 0}]}],
-            "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3"}],
+            "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3", "bufferView": 0}],
             "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 12}],
             "buffers": [{"byteLength": 12}]
         })";
@@ -361,8 +364,8 @@ TEST_CASE( "documented failure paths fail with a named reason" )
             "nodes": [{"mesh": 0}],
             "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
             "accessors": [
-                {"componentType": 5126, "count": 2, "type": "VEC3"},
-                {"componentType": 5125, "count": 3, "type": "SCALAR"}
+                {"componentType": 5126, "count": 2, "type": "VEC3", "bufferView": 0},
+                {"componentType": 5125, "count": 3, "type": "SCALAR", "bufferView": 1}
             ],
             "bufferViews": [
                 {"buffer": 0, "byteOffset": 0, "byteLength": 24},
@@ -389,7 +392,7 @@ TEST_CASE( "textures and embedded images resolve through bufferViews" )
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0}],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
-        "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3"}],
+        "accessors": [{"componentType": 5126, "count": 1, "type": "VEC3", "bufferView": 0}],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": 12},
             {"buffer": 0, "byteOffset": 12, "byteLength": 4}

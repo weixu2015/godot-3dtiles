@@ -764,8 +764,16 @@ namespace tiles3d
 
     void Globe3D::set_sun_longitude_degrees( const double p_value )
     {
-        // NaN is a legal assignment here: it restores the clock-derived sub-solar point.
-        sun_longitude_degrees_ = p_value;
+        // NaN restores the clock-derived sub-solar point. It must NOT be stored: Godot's
+        // property diff writes whenever value != default and NaN != NaN is always true, so a
+        // stored NaN lands in every .tscn save (this is where those `nan` entries came from).
+        // A stale `nan` in an existing scene hits this setter on load and falls back to the
+        // clock, which is exactly what the sentinel used to mean.
+        has_sun_longitude_override_ = !std::isnan( p_value );
+        if ( has_sun_longitude_override_ )
+        {
+            sun_longitude_degrees_ = p_value;
+        }
     }
 
     double Globe3D::get_sun_longitude_degrees() const
@@ -775,7 +783,11 @@ namespace tiles3d
 
     void Globe3D::set_sun_latitude_degrees( const double p_value )
     {
-        sun_latitude_degrees_ = p_value;
+        has_sun_latitude_override_ = !std::isnan( p_value );
+        if ( has_sun_latitude_override_ )
+        {
+            sun_latitude_degrees_ = p_value;
+        }
     }
 
     double Globe3D::get_sun_latitude_degrees() const
@@ -813,7 +825,7 @@ namespace tiles3d
         double longitude_degrees = sun_longitude_degrees_;
         double latitude_degrees = sun_latitude_degrees_;
 
-        if ( std::isnan( longitude_degrees ) || std::isnan( latitude_degrees ) )
+        if ( !has_sun_longitude_override_ || !has_sun_latitude_override_ )
         {
             // Seconds since the Unix epoch. Frozen while the editor is open: a terminator that
             // creeps across the globe makes every screenshot irreproducible, and the whole
@@ -825,11 +837,11 @@ namespace tiles3d
                                    : static_cast<double>( godot::Time::get_singleton()
                                                               ->get_unix_time_from_system() );
             const Vector2 radians = sub_solar_point_radians( now );
-            if ( std::isnan( longitude_degrees ) )
+            if ( !has_sun_longitude_override_ )
             {
                 longitude_degrees = static_cast<double>( radians.x ) * kRadiansToDegrees;
             }
-            if ( std::isnan( latitude_degrees ) )
+            if ( !has_sun_latitude_override_ )
             {
                 latitude_degrees = static_cast<double>( radians.y ) * kRadiansToDegrees;
             }

@@ -562,7 +562,7 @@ vec3 srgb_to_linear_approx(vec3 c) {
                     // west-edge texels bleed across seams as dotted lines. Clamp (Cesium's
                     // CLAMP_TO_EDGE) makes border samples clean. filter_linear because the
                     // imagery has no mipmaps, so the mipmap default buys nothing.
-                    "uniform sampler2D u_albedo_texture : filter_linear, repeat_disable;\n"
+                    "uniform sampler2D u_albedo_texture : filter_linear_mipmap, repeat_disable;\n"
                     "uniform bool u_has_texture = false;\n"
                     "uniform vec3 u_base_color = vec3(1.0);\n"
                     "uniform vec2 u_uv_scale = vec2(1.0);\n"

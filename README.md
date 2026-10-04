@@ -8,7 +8,12 @@ The plugin is a self-contained C++20 implementation: an engine-agnostic scheduli
 
 ## Status
 
-Working end to end: a local photogrammetry tileset (373 `b3dm` tiles, Draco compressed) loads, refines by screen-space error and renders.
+Working end to end: photogrammetry tilesets (`b3dm`/glb, Draco compressed, KTX2 textures, 3D Tiles 1.0 & 1.1 implicit tiling via `.subtree`) load, refine by screen-space error and render.
+
+The `feat/globe` branch adds a digital-earth layer on the same kernel: `Globe3D`
+(ellipsoid surface / graticule / atmosphere), a quadtree imagery layer that places
+3D Tiles at true geodetic positions, a floating-origin camera (sub-millimetre
+resolvable motion at planet scale), and a runtime HUD (F3).
 
 This project does **not** use `cesium-native` or any Cesium code. It is an independent implementation of the 3D Tiles specification. (See [Credits](#credits) for the reference implementation used to pin down traversal semantics.)
 
@@ -21,6 +26,14 @@ This project does **not** use `cesium-native` or any Cesium code. It is an indep
 | `Godot3DTiles` | Version/build information |
 | `LongitudeLatitudeHeight` | Geodetic origin authority |
 | `EarthCenteredEarthFixed` | ECEF origin authority |
+
+`feat/globe` additionally registers:
+
+| Node | Purpose |
+|---|---|
+| `Globe3D` | Ellipsoid surface, graticule and atmosphere; rebases in O(1) on origin shift |
+| `GlobeTileLayer` | Quadtree imagery layer placing 3D Tiles at true geodetic positions |
+| `GlobeCameraController` | Orbit camera driving the floating-origin rebase |
 
 ## Architecture
 
