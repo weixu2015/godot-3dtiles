@@ -1048,9 +1048,22 @@ namespace tiles3d
         }
 
         const bool meets_sse = screen_space_error( tile ) <= maximum_screen_space_error_;
-        if ( meets_sse || tile->level >= maximum_level_ )
+        const bool at_cap = tile->level >= maximum_level_;
+        const bool wants_detail = !meets_sse && !at_cap;
+
+        // Stop at the frontier of what the pyramid has ANSWERED for.
+        //
+        // Descending on the screen-space error alone asks for detail that has not resolved yet,
+        // and right after reload_tiles() nothing has: measured on a dataset switch, one frame
+        // visited 36k tiles and created 18k meshes - 2.5 s inside this function - because the
+        // whole visible hemisphere was refined to the level cap in a single pass. Waiting for
+        // each tile's own imagery (a texture, or a 404 that marks the level missing) also makes
+        // the refinement advance at the rate the requests can actually be served, which is what
+        // keeps this bounded on every later frame.
+        const bool resolved = tile->texture.is_valid() || tile->imagery_missing;
+        if ( !wants_detail || !resolved )
         {
-            // Refined enough (or as deep as allowed): show it, request imagery gently.
+            // Refined enough (or as deep as the pyramid goes): show it, request imagery gently.
             if ( tile->needs_loading() )
             {
                 queue_tile_load( tile, medium_queue_ );
@@ -1059,8 +1072,9 @@ namespace tiles3d
             return;
         }
 
-        // Needs refining: its own imagery is wanted urgently (it is the fallback the
-        // children will render until their textures arrive), then descend.
+        // Needs refining, and the imagery to refine into is there: this tile's own imagery is
+        // wanted urgently (it is the fallback the children will render until their textures
+        // arrive), then descend.
         if ( tile->needs_loading() )
         {
             queue_tile_load( tile, high_queue_ );
@@ -1191,7 +1205,10 @@ namespace tiles3d
         // TLS uses Godot's default verification (the engine bundles a Mozilla CA set).
         // If a deployment ever needs to tolerate broken certificate stores, this is the
         // line to change - the imagery itself is public and non-sensitive.
-        request->set_timeout( 5 ); // TEMP diag: force a callback within the capture window
+        // A deadline, not a diag leftover: HTTPRequest's default is "no timeout", and a server
+        // that accepts the connection and then goes quiet would hold its concurrency slot
+        // forever - the layer would sit at max_concurrent_requests_ with nothing in flight.
+        request->set_timeout( 8 );
 
         PendingRequest pending;
         pending.tile = tile;
