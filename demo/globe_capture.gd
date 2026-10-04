@@ -292,6 +292,28 @@ func _ready() -> void:
 	if tileset != null:
 		print("tileset: placed_by_georeference=%s rendered=%s" % [
 			tileset.is_placed_by_georeference(), tileset.get_last_rendered_count()])
+		# Mipmap audit for the CONTENT path (Tileset3D glb materials). The dataset's glTF
+		# samplers declare minFilter=LINEAR (no mips); the loader now forces the mipmapped
+		# variants anyway, and this is the check that can fail if that regresses.
+		var content_meshes: Array[MeshInstance3D] = []
+		_collect_mesh_instances(tileset, content_meshes)
+		if content_meshes.is_empty():
+			print("mip: FAIL no content MeshInstance3D under Tileset3D")
+		else:
+			var mi := content_meshes[0]
+			var mat := mi.get_active_material(0)
+			if mat is StandardMaterial3D:
+				var std_mat := mat as StandardMaterial3D
+				var albedo: Texture2D = std_mat.get_texture(BaseMaterial3D.TEXTURE_ALBEDO)
+				var mip_state := "null"
+				if albedo != null:
+					var tex_img: Image = albedo.get_image()
+					mip_state = "mipmaps=%s count=%d" % [str(tex_img.has_mipmaps()), tex_img.get_mipmap_count()] if tex_img != null else "readback failed"
+				# 1=LINEAR (no mips - the bug), 3=LINEAR_WITH_MIPMAPS (the fix)
+				print("mip: content material filter=%d  albedo %s  (%d content meshes)" % [
+					std_mat.texture_filter, mip_state, content_meshes.size()])
+			else:
+				print("mip: FAIL first content material is %s" % [mat])
 
 	# The built-in ellipsoid must stand down while tiles are on screen.
 	#
@@ -635,6 +657,14 @@ func _patch_blue_excess(img: Image, p_centre: Vector2, p_size: Vector2i) -> floa
 			total += c.b - c.r
 			count += 1
 	return total / maxf(float(count), 1.0)
+
+# Depth-first collect of MeshInstance3D nodes under `root` (content tiles are attached
+# with internal mode, so get_children(true) semantics are handled inside).
+func _collect_mesh_instances(root: Node, out: Array[MeshInstance3D]) -> void:
+	for child in root.get_children(true):
+		if child is MeshInstance3D:
+			out.append(child)
+		_collect_mesh_instances(child, out)
 
 # Fires on wall-clock time, not frames, so a stalled render loop still terminates the
 # process. `create_timer` with process_always=true keeps counting while the tree is paused,

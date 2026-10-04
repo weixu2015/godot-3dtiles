@@ -91,25 +91,31 @@ namespace tiles3d
         /// glTF sampler min/mag filter to Godot's material filter. The min filter decides
         /// (it is the one applied at distance); mipmapped modes get mipmaps generated on
         /// the image. Mirrors the cesium-native era loader.
+        ///
+        /// The no-mipmap glTF filters (NEAREST/LINEAR) are deliberately upgraded to their
+        /// mipmapped variants anyway. Photogrammetry tilesets (Cesium's own San Francisco
+        /// conversion among them) declare minFilter = LINEAR, which at the tile sizes these
+        /// images come in means every low-zoom view magnifies or minifies the texture
+        /// without a mip chain: hard-edged mosaic blocks and shimmer, exactly what the
+        /// user reported. CesiumJS and the three.js reference both ignore the sampler here
+        /// and force trilinear + generateMipmaps on 3D Tiles content - geographic imagery
+        /// is *always* minified at distance, so aliasing costs more than filter fidelity.
         BaseMaterial3D::TextureFilter mapTextureFilter( const core::GltfTextureData &texture,
                                                         bool &generateMipmaps )
         {
-            generateMipmaps = false;
+            generateMipmaps = true;
 
             switch ( texture.minFilter )
             {
-                case 9728u: // NEAREST
-                    return BaseMaterial3D::TEXTURE_FILTER_NEAREST;
-                case 9729u: // LINEAR
-                    return BaseMaterial3D::TEXTURE_FILTER_LINEAR;
+                case 9728u: // NEAREST (sharp texels, but with a mip chain)
+                    return BaseMaterial3D::TEXTURE_FILTER_NEAREST_WITH_MIPMAPS;
                 case 9984u: // NEAREST_MIPMAP_NEAREST
-                    generateMipmaps = true;
                     return BaseMaterial3D::TEXTURE_FILTER_NEAREST_WITH_MIPMAPS;
                 case 9985u: // LINEAR_MIPMAP_NEAREST
                 case 9986u: // NEAREST_MIPMAP_LINEAR
                 case 9987u: // LINEAR_MIPMAP_LINEAR (also the glTF default)
+                case 9729u: // LINEAR - see the note above: mips forced anyway
                 default:
-                    generateMipmaps = true;
                     return BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS;
             }
         }

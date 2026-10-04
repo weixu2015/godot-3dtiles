@@ -173,8 +173,11 @@ namespace tiles3d
         godot::String url_template_{
             "http://127.0.0.1:9090/tiles/bing/{q}.jpeg?n=z&g=11404" };
         double maximum_screen_space_error_ = 2.0;
-        // 19 is Bing's service ceiling, but this machine's local cache stops at 16
-        // (levels 14-16 are partial; 17+ are empty), so 16 avoids a 404 storm.
+        // Bing's service ceiling is 19, but this machine's static cache is the real limit
+        // (audited 2026-10-04: levels 1-8 global, 9-11 dense only in some regions, 12+
+        // empty). request()-time 404s mark tiles imagery_missing and the traversal stops
+        // there, so a generous ceiling costs nothing; 16 keeps the worst-case request
+        // count bounded.
         int maximum_level_ = 16;
         int tile_cache_size_ = 600;
         int max_concurrent_requests_ = 10;

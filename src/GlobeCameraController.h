@@ -212,20 +212,45 @@ namespace tiles3d
         bool right_dragging_ = false;
         godot::Vector2 last_mouse_position_;
 
+        // Right-drag tilt state, resolved once at mousedown like the reference: the ray
+        // through the cursor is intersected with the ellipsoid, and a hit becomes the
+        // pivot the whole drag tilts about. A miss (the cursor is on space) degrades the
+        // drag to a free look until the button is released. The pivot is kept in Y-up ECEF
+        // doubles - parent-space floats would quantise it to half-metre ticks.
+        bool tilt_looking_ = false;
+        bool tilt_pivot_valid_ = false;
+        math::Vec3 tilt_pivot_ecef_{};
+
         // Drag inertia window between release and the last motion.
         double last_drag_dx_ = 0.0;
         double last_drag_dy_ = 0.0;
         double mouse_down_time_ = 0.0;
         double mouse_up_time_ = 0.0;
 
-        // Wheel zoom easing state (log-distance integrator, same as the reference).
+        // Wheel zoom easing state, ported from the map-cesium wrapper
+        // (useCesiumMouseSetting.ts bindWheelZoom): the integration variable is the
+        // camera-to-focus distance - focus = the ground point under the screen centre -
+        // so one notch multiplies the distance to the GROUND by a fixed ratio at every
+        // altitude. The old centre-distance integrator moved ~0.2 x 6371 km per notch
+        // down low, which is what made the zoom slam into its floor near the surface.
         bool wheel_animating_ = false;
-        double wheel_log_distance_ = 0.0;
+        double wheel_log_distance_ = 0.0; // log of the camera-to-focus distance
         double wheel_log_velocity_ = 0.0;
         double wheel_last_time_ = 0.0;
-        godot::Vector3 wheel_radial_direction_;
+        godot::Vector3 wheel_radial_direction_; // focus -> camera unit vector, parent space
+
+        /// The screen-centre ground focus in Y-up ECEF doubles - the same trick as
+        /// tilt_pivot_ecef_: parent-space floats would quantise, and an origin shift
+        /// between wheel notches would invalidate them; ECEF doubles survive both.
+        bool wheel_focus_valid_ = false;
+        math::Vec3 wheel_focus_ecef_{};
 
         godot::Vector3 resolve_pivot() const;
+
+        /// wheel_focus_ecef_ converted to the camera's parent space, re-derived per read
+        /// (an origin shift can rebase between the pick and this read). Without a valid
+        /// pick it falls back to the planet centre - the pre-port behaviour.
+        godot::Vector3 wheel_focus_parent() const;
 
         // ---- frame space vs parent space (see the definitions for the full story) ----
         const godot::Node3D *resolve_frame_node() const;
@@ -251,6 +276,14 @@ namespace tiles3d
                                    double p_angle );
         void apply_orbit_drag( double p_dx, double p_dy );
         void apply_tilt_drag( double p_dx, double p_dy );
+        void apply_look_drag( double p_dx, double p_dy );
+
+        /// Intersects the ray through `p_screen` with the WGS84 ellipsoid. On a hit,
+        /// `out_ecef_y_up` receives the intersection in Y-up ECEF metres (double) and the
+        /// result is true. Rays that miss the planet, or a scene without a resolvable
+        /// frame, return false.
+        bool pick_ellipsoid_point( const godot::Vector2 &p_screen,
+                                   math::Vec3 &out_ecef_y_up ) const;
         void update_zoom_easing( double p_delta );
         void update_drag_inertia( double p_delta );
         void update_fly( double p_delta );
@@ -267,14 +300,6 @@ namespace tiles3d
 
         /// Closest the camera may get to the ellipsoid centre (just above the polar radius).
         static double min_distance();
-
-        /// Closest the wheel zoom may pull the camera in: the *local* surface radius under
-        /// the camera's current radial direction plus kMinCameraHeight. min_distance() is the
-        /// polar radius times 1.01, which is a 63 km floor anywhere else on the planet - that
-        /// floor is what made the globe impossible to zoom all the way in on. The zoom and
-        /// the keep-above clamp (enforce_camera_above_ellipsoid) must agree, and they now do:
-        /// both bottom out 1 m above the surface.
-        double zoom_min_distance() const;
 
         /// Furthest the camera may orbit: eight earth radii, the reference MAX_DIST.
         static double max_distance();

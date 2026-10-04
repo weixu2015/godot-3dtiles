@@ -761,6 +761,27 @@ namespace tiles3d
         frustum_planes_[2] = row3 + row1; // bottom
         frustum_planes_[3] = row3 - row1; // top
         frustum_planes_[4] = row3 + row2; // near
+
+        // Gribb-Hartmann row combinations are NOT unit planes: at fov 75 the bottom/top
+        // plane normal carries |n| ~ 1.6 and left/right ~ 1.2 (aspect-widened). Testing
+        // `distance < -radius` against such a plane shrinks the survival margin from
+        // `radius` to `radius / |n|` - at 75 deg that culles every edge tile whose sphere
+        // pokes less than ~40% of its radius into the view, which showed up as black
+        // wedge-shaped notches along the viewport edges and, near the ground, as whole
+        // missing tiles exposing the neighbours' skirts. Normalising puts the signed
+        // distance in metres and makes the sphere test exact.
+        for ( math::Vec4 &plane : frustum_planes_ )
+        {
+            const double normal_length =
+                std::sqrt( plane.x * plane.x + plane.y * plane.y + plane.z * plane.z );
+            if ( normal_length > 1e-12 )
+            {
+                plane.x /= normal_length;
+                plane.y /= normal_length;
+                plane.z /= normal_length;
+                plane.w /= normal_length;
+            }
+        }
     }
 
     bool GlobeTileLayer::sphere_intersects_frustum( const math::Vec3 &center_world,
@@ -1012,6 +1033,20 @@ namespace tiles3d
     void GlobeTileLayer::visit_tile( GlobeTile *tile )
     {
         compute_distance_to_tile( tile );
+
+        // Imagery availability gate. A 404 means the cache pyramid ends at this tile, and
+        // by dyadic subdivision every descendant would 404 too. Showing this tile and
+        // stopping is what kills the hard-edged "tile matrix" up close: descending would
+        // subdivide the view into hundreds of leaf meshes that each re-sample a sliver of
+        // an upsampled ancestor (worst case one ancestor texel per tile - a flat colour
+        // square), with a half-texel discontinuity stitched between every pair. The tile's
+        // appearance resolves to the nearest loaded ancestor either way.
+        if ( tile->imagery_missing )
+        {
+            show_tile_this_frame( tile );
+            return;
+        }
+
         const bool meets_sse = screen_space_error( tile ) <= maximum_screen_space_error_;
         if ( meets_sse || tile->level >= maximum_level_ )
         {
@@ -1241,6 +1276,10 @@ namespace tiles3d
         {
             tile->state = GlobeTile::LoadState::FAILED;
             tile->fail_time = now_seconds();
+            // A 404 from the static tile server is definitive: this quadkey simply is not
+            // in the cache. Flag it so the traversal stops subdividing here (see
+            // visit_tile) instead of requesting the whole missing subtree over and over.
+            tile->imagery_missing = ( p_response_code == 404 );
 
             // A failing tile server is indistinguishable from the placeholder colour without
             // this line. String::format() wants {0} placeholders, not printf ones, so build
@@ -1558,26 +1597,18 @@ namespace tiles3d
         double dv = ( math::mercatorY( tr.north ) - math::mercatorY( tr.south ) ) / ( smn - sms );
         double v0 = ( smn - math::mercatorY( tr.north ) ) / ( smn - sms );
 
-        // Half-texel inset (ancestor sampling only). Tile rectangles are dyadic fractions
-        // of the ancestor's, so tile edges land EXACTLY on ancestor texel boundaries and
-        // the edge fragment row bilinear-blends ~50% of the neighbouring texel column -
-        // bright coast/cloud texels bleed across seams as dotted lines (probe-verified:
-        // a seam dot samples as 50% land texel + 50% sea). Shrinking the mapped rect by
-        // one texel centres the edge samples on the tile's own outermost texels, the same
-        // trick Cesium's imagery compositing uses. When source == tile the edges hit the
-        // texture border, where the default clamp-to-edge sampler is already clean, so no
-        // inset is applied there.
-        if ( source != tile )
-        {
-            const std::int64_t tex_w = source->texture->get_width();
-            const std::int64_t tex_h = source->texture->get_height();
-            const double texel_u = 1.0 / static_cast<double>( tex_w > 0 ? tex_w : 1 );
-            const double texel_v = 1.0 / static_cast<double>( tex_h > 0 ? tex_h : 1 );
-            du = std::max( du - texel_u, 0.0 );
-            dv = std::max( dv - texel_v, 0.0 );
-            u0 += 0.5 * texel_u;
-            v0 += 0.5 * texel_v;
-        }
+        // No half-texel inset here, on purpose. The edge fragment row of this tile and of
+        // its neighbour both sample the exact same boundary of the ancestor texture, so
+        // bilinear filtering blends the two straddling texels identically on both sides -
+        // the seam is a soft one-texel gradient, exactly like the reference (which does no
+        // inset either). The half-texel inset tried here earlier shifted each tile's
+        // sampled window inward, which in the magnified regime of a partial imagery cache
+        // (a tile stretching many screen pixels per ancestor texel) replaced that soft
+        // gradient with a hard texel step pinned to every tile edge - the sharp "tile
+        // matrix" grid. Tile rectangles are dyadic fractions of the ancestor's, so tile
+        // edges land exactly on ancestor texel boundaries and no inset is needed for
+        // alignment. When source == tile the edges hit the texture border, where the
+        // default clamp-to-edge sampler is already clean.
 
         material->set_shader_parameter( "u_has_texture", true );
         material->set_shader_parameter( "u_albedo_texture", source->texture );

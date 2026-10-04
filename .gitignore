@@ -98,3 +98,18 @@ demo/camera_probe.gd.uid
 # GLOBE_NO_ORIGIN_SHIFT) are what proved the RTC shading fix. Its uid sidecar is
 # editor-generated noise rather than a matching pair - the editor regenerates it on next open.
 demo/*_audit.gd.uid
+
+demo/tilt_probe.gd
+demo/tilt_probe.gd.uid
+demo/grid_probe.gd
+demo/grid_probe.gd.uid
+demo/grid_probe.png
+demo/grid_probe.png.import
+demo/underground_probe.gd
+demo/underground_probe.gd.uid
+demo/debug_probe.gd
+demo/debug_probe.gd.uid
+demo/cull_probe.gd
+demo/cull_probe.gd.uid
+demo/cull_probe.png
+demo/cull_probe.png.import

@@ -73,6 +73,12 @@ namespace tiles3d
         /// the reference's 15-second retry cool-down.
         double fail_time = 0.0;
 
+        /// The server answered 404 for this tile's imagery: the local cache pyramid ends
+        /// here. Dyadic subdivision means every descendant would 404 too, so the
+        /// traversal treats this tile as a leaf (see GlobeTileLayer::visit_tile) instead
+        /// of manufacturing sub-tiles that can only re-sample an upsampled ancestor.
+        bool imagery_missing = false;
+
         bool needs_loading() const { return state < LoadState::DONE; }
 
         // ---- resources, owned by the layer ----
