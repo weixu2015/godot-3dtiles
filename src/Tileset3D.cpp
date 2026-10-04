@@ -319,20 +319,43 @@ namespace tiles3d
 
     void Tileset3D::_bind_methods()
     {
+        // Inspector layout. The pre-refactor Cesium3DTileset exposed 18 knobs; the self-hosted
+        // loader started with 8, which is not enough to answer the questions this node gets asked
+        // (why is this tile here, why is that one missing, what is the frame spending itself on).
+        // Grouped so the Inspector reads as four questions rather than a wall: what to load, how
+        // hard to refine, what it costs per frame, and what the loader currently holds.
+        ADD_GROUP( "Tileset", "" );
         ClassDB::bind_method( D_METHOD( "set_url", "p_url" ), &Tileset3D::set_url );
         ClassDB::bind_method( D_METHOD( "get_url" ), &Tileset3D::get_url );
         ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::STRING, "url" ), "set_url",
                                "get_url" );
 
+        ADD_GROUP( "Refinement", "" );
         ClassDB::bind_method( D_METHOD( "set_maximum_screen_space_error", "p_value" ),
                               &Tileset3D::set_maximum_screen_space_error );
         ClassDB::bind_method( D_METHOD( "get_maximum_screen_space_error" ),
                               &Tileset3D::get_maximum_screen_space_error );
         ClassDB::add_property( "Tileset3D",
-                               PropertyInfo( Variant::FLOAT, "maximum_screen_space_error" ),
+                               PropertyInfo( Variant::FLOAT, "maximum_screen_space_error",
+                                             godot::PROPERTY_HINT_RANGE, "0.5,128,0.5,or_greater" ),
                                "set_maximum_screen_space_error",
                                "get_maximum_screen_space_error" );
 
+        ClassDB::bind_method( D_METHOD( "set_maximum_level", "p_value" ),
+                              &Tileset3D::set_maximum_level );
+        ClassDB::bind_method( D_METHOD( "get_maximum_level" ), &Tileset3D::get_maximum_level );
+        ClassDB::add_property( "Tileset3D",
+                               PropertyInfo( Variant::INT, "maximum_level", godot::PROPERTY_HINT_RANGE,
+                                             "-1,24,1" ),
+                               "set_maximum_level", "get_maximum_level" );
+
+        ClassDB::bind_method( D_METHOD( "set_suspend_update", "p_value" ),
+                              &Tileset3D::set_suspend_update );
+        ClassDB::bind_method( D_METHOD( "get_suspend_update" ), &Tileset3D::get_suspend_update );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "suspend_update" ),
+                               "set_suspend_update", "get_suspend_update" );
+
+        ADD_GROUP( "Loading", "" );
         ClassDB::bind_method( D_METHOD( "set_maximum_simultaneous_loads", "p_value" ),
                               &Tileset3D::set_maximum_simultaneous_loads );
         ClassDB::bind_method( D_METHOD( "get_maximum_simultaneous_loads" ),
@@ -342,6 +365,35 @@ namespace tiles3d
                                              godot::PROPERTY_HINT_RANGE, "1,128,1" ),
                                "set_maximum_simultaneous_loads",
                                "get_maximum_simultaneous_loads" );
+
+        ClassDB::bind_method( D_METHOD( "set_maximum_uploads_per_frame", "p_value" ),
+                              &Tileset3D::set_maximum_uploads_per_frame );
+        ClassDB::bind_method( D_METHOD( "get_maximum_uploads_per_frame" ),
+                              &Tileset3D::get_maximum_uploads_per_frame );
+        ClassDB::add_property( "Tileset3D",
+                               PropertyInfo( Variant::INT, "maximum_uploads_per_frame",
+                                             godot::PROPERTY_HINT_RANGE, "1,64,1" ),
+                               "set_maximum_uploads_per_frame",
+                               "get_maximum_uploads_per_frame" );
+
+        ADD_GROUP( "Debug", "" );
+        ClassDB::bind_method( D_METHOD( "set_show", "p_value" ), &Tileset3D::set_show );
+        ClassDB::bind_method( D_METHOD( "get_show" ), &Tileset3D::get_show );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "show" ), "set_show",
+                               "get_show" );
+
+        ClassDB::bind_method( D_METHOD( "set_auto_frame_on_load", "p_value" ),
+                              &Tileset3D::set_auto_frame_on_load );
+        ClassDB::bind_method( D_METHOD( "get_auto_frame_on_load" ),
+                              &Tileset3D::get_auto_frame_on_load );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "auto_frame_on_load" ),
+                               "set_auto_frame_on_load", "get_auto_frame_on_load" );
+
+        ClassDB::bind_method( D_METHOD( "set_debug_print_lod", "p_value" ),
+                              &Tileset3D::set_debug_print_lod );
+        ClassDB::bind_method( D_METHOD( "get_debug_print_lod" ), &Tileset3D::get_debug_print_lod );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "debug_print_lod" ),
+                               "set_debug_print_lod", "get_debug_print_lod" );
 
         ClassDB::bind_method( D_METHOD( "set_debug_show_bounding_volume", "p_value" ),
                               &Tileset3D::set_debug_show_bounding_volume );
@@ -361,18 +413,6 @@ namespace tiles3d
                                "set_debug_bounding_volume_scale",
                                "get_debug_bounding_volume_scale" );
 
-        ClassDB::bind_method( D_METHOD( "set_show", "p_value" ), &Tileset3D::set_show );
-        ClassDB::bind_method( D_METHOD( "get_show" ), &Tileset3D::get_show );
-        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "show" ), "set_show",
-                               "get_show" );
-
-        ClassDB::bind_method( D_METHOD( "set_auto_frame_on_load", "p_value" ),
-                              &Tileset3D::set_auto_frame_on_load );
-        ClassDB::bind_method( D_METHOD( "get_auto_frame_on_load" ),
-                              &Tileset3D::get_auto_frame_on_load );
-        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "auto_frame_on_load" ),
-                               "set_auto_frame_on_load", "get_auto_frame_on_load" );
-
         ClassDB::bind_method( D_METHOD( "set_debug_colorize_tiles", "p_value" ),
                               &Tileset3D::set_debug_colorize_tiles );
         ClassDB::bind_method( D_METHOD( "get_debug_colorize_tiles" ),
@@ -380,34 +420,88 @@ namespace tiles3d
         ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "debug_colorize_tiles" ),
                                "set_debug_colorize_tiles", "get_debug_colorize_tiles" );
 
+        // Read-only, and worth having in the Inspector rather than only on the console: these are
+        // the numbers that answer "is it loading", "is it in the frustum", "where does it think
+        // it is". Bound with an empty setter, which is how Godot spells a read-only property.
+        ADD_GROUP( "Runtime (read-only)", "" );
+        const auto readonly_string = []( const char *p_name ) {
+            return PropertyInfo( Variant::STRING, p_name, godot::PROPERTY_HINT_NONE, "",
+                                 godot::PROPERTY_USAGE_EDITOR | godot::PROPERTY_USAGE_READ_ONLY );
+        };
+        const auto readonly_int = []( const char *p_name ) {
+            return PropertyInfo( Variant::INT, p_name, godot::PROPERTY_HINT_NONE, "",
+                                 godot::PROPERTY_USAGE_EDITOR | godot::PROPERTY_USAGE_READ_ONLY );
+        };
+        const auto readonly_float = []( const char *p_name ) {
+            return PropertyInfo( Variant::FLOAT, p_name, godot::PROPERTY_HINT_NONE, "",
+                                 godot::PROPERTY_USAGE_EDITOR | godot::PROPERTY_USAGE_READ_ONLY );
+        };
+        const auto readonly_bool = []( const char *p_name ) {
+            return PropertyInfo( Variant::BOOL, p_name, godot::PROPERTY_HINT_NONE, "",
+                                 godot::PROPERTY_USAGE_EDITOR | godot::PROPERTY_USAGE_READ_ONLY );
+        };
+        const auto readonly_vector3 = []( const char *p_name ) {
+            return PropertyInfo( Variant::VECTOR3, p_name, godot::PROPERTY_HINT_NONE, "",
+                                 godot::PROPERTY_USAGE_EDITOR | godot::PROPERTY_USAGE_READ_ONLY );
+        };
+
+        ClassDB::bind_method( D_METHOD( "get_asset_version" ), &Tileset3D::get_asset_version );
+        ClassDB::add_property( "Tileset3D", readonly_string( "asset_version" ), "",
+                               "get_asset_version" );
+        ClassDB::bind_method( D_METHOD( "get_tile_count" ), &Tileset3D::get_tile_count );
+        ClassDB::add_property( "Tileset3D", readonly_int( "tile_count" ), "", "get_tile_count" );
+        ClassDB::bind_method( D_METHOD( "get_maximum_depth" ), &Tileset3D::get_maximum_depth );
+        ClassDB::add_property( "Tileset3D", readonly_int( "declared_maximum_depth" ), "",
+                               "get_maximum_depth" );
+        ClassDB::bind_method( D_METHOD( "get_root_geometric_error" ),
+                              &Tileset3D::get_root_geometric_error );
+        ClassDB::add_property( "Tileset3D", readonly_float( "root_geometric_error" ), "",
+                               "get_root_geometric_error" );
+
+        ClassDB::bind_method( D_METHOD( "get_loaded_tile_count" ),
+                              &Tileset3D::get_loaded_tile_count );
+        ClassDB::add_property( "Tileset3D", readonly_int( "loaded_tile_count" ), "",
+                               "get_loaded_tile_count" );
+        ClassDB::bind_method( D_METHOD( "get_last_rendered_count" ),
+                              &Tileset3D::get_last_rendered_count );
+        ClassDB::add_property( "Tileset3D", readonly_int( "last_rendered_count" ), "",
+                               "get_last_rendered_count" );
+        ClassDB::bind_method( D_METHOD( "get_in_flight_count" ), &Tileset3D::get_in_flight_count );
+        ClassDB::add_property( "Tileset3D", readonly_int( "in_flight_count" ), "",
+                               "get_in_flight_count" );
+        ClassDB::bind_method( D_METHOD( "get_loaded_bytes" ), &Tileset3D::get_loaded_bytes );
+        ClassDB::add_property( "Tileset3D", readonly_int( "loaded_bytes" ), "",
+                               "get_loaded_bytes" );
+
+        ClassDB::bind_method( D_METHOD( "get_dataset_longitude" ),
+                              &Tileset3D::get_dataset_longitude );
+        ClassDB::add_property( "Tileset3D", readonly_float( "dataset_longitude" ), "",
+                               "get_dataset_longitude" );
+        ClassDB::bind_method( D_METHOD( "get_dataset_latitude" ), &Tileset3D::get_dataset_latitude );
+        ClassDB::add_property( "Tileset3D", readonly_float( "dataset_latitude" ), "",
+                               "get_dataset_latitude" );
+        ClassDB::bind_method( D_METHOD( "get_dataset_height" ), &Tileset3D::get_dataset_height );
+        ClassDB::add_property( "Tileset3D", readonly_float( "dataset_height" ), "",
+                               "get_dataset_height" );
+        ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
+        ClassDB::add_property( "Tileset3D", readonly_float( "dataset_radius" ), "",
+                               "get_dataset_radius" );
+        ClassDB::bind_method( D_METHOD( "get_anchor_separation" ),
+                              &Tileset3D::get_anchor_separation );
+        ClassDB::add_property( "Tileset3D", readonly_float( "anchor_separation_m" ), "",
+                               "get_anchor_separation" );
+        ClassDB::bind_method( D_METHOD( "is_placed_by_georeference" ),
+                              &Tileset3D::is_placed_by_georeference );
+        ClassDB::add_property( "Tileset3D", readonly_bool( "placed_by_georeference" ), "",
+                               "is_placed_by_georeference" );
+        ClassDB::bind_method( D_METHOD( "get_last_error" ), &Tileset3D::get_last_error );
+        ClassDB::add_property( "Tileset3D", readonly_string( "last_error" ), "", "get_last_error" );
+
         ClassDB::bind_method( D_METHOD( "load" ), &Tileset3D::load );
         ClassDB::bind_method( D_METHOD( "reload" ), &Tileset3D::reload );
         ClassDB::bind_method( D_METHOD( "unload" ), &Tileset3D::unload );
         ClassDB::bind_method( D_METHOD( "rebase", "p_parent_delta" ), &Tileset3D::rebase );
         ClassDB::bind_method( D_METHOD( "dump_tree", "max_depth" ), &Tileset3D::dump_tree );
-
-        ClassDB::bind_method( D_METHOD( "get_tile_count" ), &Tileset3D::get_tile_count );
-        ClassDB::bind_method( D_METHOD( "get_maximum_depth" ), &Tileset3D::get_maximum_depth );
-        ClassDB::bind_method( D_METHOD( "get_asset_version" ), &Tileset3D::get_asset_version );
-        ClassDB::bind_method( D_METHOD( "get_root_geometric_error" ),
-                              &Tileset3D::get_root_geometric_error );
-        ClassDB::bind_method( D_METHOD( "get_last_error" ), &Tileset3D::get_last_error );
-
-        ClassDB::bind_method( D_METHOD( "get_dataset_longitude" ),
-                              &Tileset3D::get_dataset_longitude );
-        ClassDB::bind_method( D_METHOD( "get_dataset_latitude" ), &Tileset3D::get_dataset_latitude );
-        ClassDB::bind_method( D_METHOD( "get_dataset_height" ), &Tileset3D::get_dataset_height );
-        ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
-        ClassDB::bind_method( D_METHOD( "get_anchor_separation" ),
-                              &Tileset3D::get_anchor_separation );
-        ClassDB::bind_method( D_METHOD( "is_placed_by_georeference" ),
-                              &Tileset3D::is_placed_by_georeference );
-        ClassDB::bind_method( D_METHOD( "get_loaded_tile_count" ),
-                              &Tileset3D::get_loaded_tile_count );
-        ClassDB::bind_method( D_METHOD( "get_last_rendered_count" ),
-                              &Tileset3D::get_last_rendered_count );
-        ClassDB::bind_method( D_METHOD( "get_loaded_bytes" ), &Tileset3D::get_loaded_bytes );
-        ClassDB::bind_method( D_METHOD( "get_in_flight_count" ), &Tileset3D::get_in_flight_count );
 
         ADD_SIGNAL( godot::MethodInfo( "tileset_loaded" ) );
         ADD_SIGNAL( godot::MethodInfo( "load_failed", PropertyInfo( Variant::STRING, "reason" ) ) );
@@ -481,6 +575,46 @@ namespace tiles3d
     double Tileset3D::get_maximum_screen_space_error() const
     {
         return maximum_screen_space_error;
+    }
+
+    void Tileset3D::set_maximum_uploads_per_frame( const int p_value )
+    {
+        maximum_uploads_per_frame = std::max( 1, p_value );
+    }
+
+    int Tileset3D::get_maximum_uploads_per_frame() const
+    {
+        return maximum_uploads_per_frame;
+    }
+
+    void Tileset3D::set_maximum_level( const int p_value )
+    {
+        maximum_level = p_value;
+    }
+
+    int Tileset3D::get_maximum_level() const
+    {
+        return maximum_level;
+    }
+
+    void Tileset3D::set_suspend_update( const bool p_value )
+    {
+        suspend_update = p_value;
+    }
+
+    bool Tileset3D::get_suspend_update() const
+    {
+        return suspend_update;
+    }
+
+    void Tileset3D::set_debug_print_lod( const bool p_value )
+    {
+        debug_print_lod = p_value;
+    }
+
+    bool Tileset3D::get_debug_print_lod() const
+    {
+        return debug_print_lod;
     }
 
     void Tileset3D::set_debug_show_bounding_volume( const bool p_value )
@@ -1805,6 +1939,15 @@ namespace tiles3d
             return;
         }
 
+        // suspend_update: hold the selection where it is. The tree stays loaded and the
+        // visibility of what is already selected is untouched, so the camera can be moved
+        // (and the previous frame's result photographed) without the LOD chasing it - which is
+        // the whole point when the question is "is this what I asked for".
+        if ( suspend_update )
+        {
+            return;
+        }
+
         // Editor convenience: fly the camera to frame the dataset once after it loads.
         if ( needs_framing )
         {
@@ -1856,8 +1999,9 @@ namespace tiles3d
             static std::size_t lastReportedRendered = 0;
             constexpr std::uint64_t kReportInterval = 60;
 
-            if ( last_rendered_count != lastReportedRendered ||
-                 frame_number - lastReportFrame >= kReportInterval )
+            if ( debug_print_lod &&
+                 ( last_rendered_count != lastReportedRendered ||
+                   frame_number - lastReportFrame >= kReportInterval ) )
             {
                 lastReportFrame = frame_number;
                 lastReportedRendered = last_rendered_count;
@@ -1938,10 +2082,18 @@ namespace tiles3d
         const bool wantsRefine = tile.isExternalTileset || forceRefine || unconditionallyRefine ||
                                  sse > maximum_screen_space_error;
 
+        // maximum_level: the user's hard floor on depth. Applied last so it overrides every
+        // reason to refine above it - including the unconditional ones, which exist to rescue
+        // content that would otherwise be a dead end, and which would otherwise make the cap
+        // unreachable on exactly the datasets that need it most. -1 means "no extra cap", and
+        // the tileset's own levelCap() (implicit tiling) still applies as before.
+        const bool under_level_cap = maximum_level < 0 || tile.depth < maximum_level;
+        const bool refine_allowed = wantsRefine && under_level_cap;
+
         // Implicit tiles have no children until their subtree is decoded. Materialise on the
         // first refinement so the tree below this tile is real before anything walks it; doing
         // it here rather than at load is what keeps a deep implicit root cheap to open.
-        if ( wantsRefine && tile.implicitTiling.has_value() )
+        if ( refine_allowed && tile.implicitTiling.has_value() )
         {
             ensure_implicit_children( tile );
         }
@@ -1982,7 +2134,7 @@ namespace tiles3d
             // ADD renders the parent and its children at the same time.
             selectSelf();
 
-            if ( wantsRefine )
+            if ( refine_allowed )
             {
                 for ( const std::unique_ptr<core::Tile> &child : tile.children )
                 {
@@ -1993,7 +2145,7 @@ namespace tiles3d
         }
 
         // REPLACE.
-        if ( !wantsRefine )
+        if ( !refine_allowed )
         {
             selectSelf();
             return;

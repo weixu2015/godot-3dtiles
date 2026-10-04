@@ -68,6 +68,17 @@ namespace tiles3d
         /// it. Sized so a cold start ramps up quickly without dropping a frame.
         int maximum_uploads_per_frame = 4;
 
+        /// Hard cap on refinement depth; -1 = no cap beyond what the tileset's own geometric
+        /// errors (and an implicit subtree's level cap) already impose.
+        int maximum_level = -1;
+
+        /// Freeze the selection traversal without tearing anything down.
+        bool suspend_update = false;
+
+        /// Print the per-frame LOD diagnostic line. On by default: this node is meant to be
+        /// watched from the console while it is being tuned, and a shipping game turns it off.
+        bool debug_print_lod = true;
+
         /// Draws the tile bounding volumes. On by default while there is no content
         /// rendering: it is the only thing that shows up in the editor.
         bool debug_show_bounding_volume = true;
@@ -292,6 +303,31 @@ namespace tiles3d
 
         void set_maximum_simultaneous_loads( int p_value );
         int get_maximum_simultaneous_loads() const;
+
+        /// How many decoded tile meshes may be handed to the RenderingServer per frame. Loading
+        /// (network + decode) is off the main thread, but creating the meshes is not, so this is
+        /// the knob that decides how much of a frame a burst of arrivals is allowed to take.
+        void set_maximum_uploads_per_frame( int p_value );
+        int get_maximum_uploads_per_frame() const;
+
+        /// Hard cap on the refinement depth. -1 (the default) means "whatever the tileset's own
+        /// geometric errors ask for", which for implicit tiling is the subtree's level cap.
+        /// Setting it lower is the quickest way to see how much of a frame's cost is the deep
+        /// levels rather than the near ones.
+        void set_maximum_level( int p_value );
+        int get_maximum_level() const;
+
+        /// Freeze the selection traversal without unloading anything: the camera keeps moving,
+        /// the tree stops being re-evaluated. For poking at what is already on screen without
+        /// the LOD churn underneath it.
+        void set_suspend_update( bool p_value );
+        bool get_suspend_update() const;
+
+        /// Print the per-frame LOD line (camera, screen space errors, counts). On by default
+        /// because this node exists to be inspected from the console, and off is the first thing
+        /// a shipping game wants.
+        void set_debug_print_lod( bool p_value );
+        bool get_debug_print_lod() const;
 
         void set_debug_show_bounding_volume( bool p_value );
         bool get_debug_show_bounding_volume() const;
