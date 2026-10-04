@@ -28,6 +28,7 @@
 #include "godot_cpp/variant/string.hpp"
 #include "godot_cpp/variant/vector3.hpp"
 
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -195,9 +196,21 @@ namespace tiles3d
         /// renderable content and fails with "unsupported tile content container". A dataset
         /// built from nested tilesets - taiwan, with 2791 of them - then shows nothing at
         /// all while still reporting a handful of tiles as loaded.
-        void expand_external_tilesets();
+        /// Walks the tree once, with no I/O, and queues every tile whose content is a nested
+        /// tileset document. Cheap enough to run inside load().
+        void queue_external_tilesets();
 
-        void expand_external_tileset( core::Tile &tile, int depth );
+        /// Drains that queue within a per-frame time budget. This is the difference between a
+        /// node that opens instantly and one that blocks the editor for a minute: see the
+        /// definition for the whole story.
+        void process_external_tileset_queue();
+
+        /// Queues the external-tileset documents found under `p_tile`, without reading any.
+        void enqueue_external_descendants( core::Tile &p_tile );
+
+        /// Reads and splices one tile's nested tileset document into it.
+        void merge_external_tileset( core::Tile &p_tile );
+
 
         /// Rewrites the relative content URIs of a freshly merged subtree so they resolve
         /// against `directory`, the document that declared them, rather than against the
@@ -285,6 +298,13 @@ namespace tiles3d
         mutable godot::Ref<godot::HTTPClient> http_reuse_;
         mutable godot::String http_reuse_host_;
         mutable int http_reuse_port_ = -1;
+
+        /// Tiles whose nested tileset document still has to be read, in discovery order.
+        /// A worklist rather than a recursive walk because each entry costs a blocking HTTP
+        /// round trip: doing them all inside load() put a minute of them between the editor
+        /// opening a scene and the editor being usable.
+        std::deque<core::Tile *> external_queue_;
+        static constexpr double kExternalQueueBudgetSeconds = 0.006;
         /// When the kept-alive socket was last used, so a socket the server has probably closed in
         /// the meantime is not reused. See the reuse check in read_document.
         mutable double http_reuse_last_use_ = -1e30;

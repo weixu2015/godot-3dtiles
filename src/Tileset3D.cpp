@@ -1093,11 +1093,12 @@ namespace tiles3d
         // Windows path without the caller guessing which separator applies.
         base_directory = path;
 
-        // Splice in every nested tileset before anything else looks at the tree: the
-        // traversal, the region conversion, the bounding volume debug mesh and the tile
-        // count all have to see the real tree rather than a stump of unresolved
-        // `tileset.json` references.
-        expand_external_tilesets();
+        // Find the nested tilesets now and read them over the next frames. The traversal, the
+        // region conversion and the debug mesh all cope with a tree that is still filling in -
+        // that is the same state the tile content itself is in while it streams - whereas doing
+        // all of the reads here meant a dataset with hundreds of nested tilesets (taiwan: 2603)
+        // blocked the editor's scene reopen for a minute.
+        queue_external_tilesets();
 
         placed_by_georeference = find_georeference() != nullptr;
         const math::Mat4 model = compute_model_matrix();
@@ -1226,6 +1227,9 @@ namespace tiles3d
 
     void Tileset3D::unload()
     {
+        // Before clear_loaded(): the queue holds raw pointers into the tree that is about to be
+        // destroyed.
+        external_queue_.clear();
         clear_loaded();
     }
 
@@ -1275,27 +1279,78 @@ namespace tiles3d
         // every origin shift - it comes back correct on the next full rebuild.
     }
 
-    void Tileset3D::expand_external_tilesets()
+    void Tileset3D::queue_external_tilesets()
     {
         if ( root == nullptr )
         {
             return;
         }
 
-        expand_external_tileset( *root, 0 );
+        // Discovery only, no I/O: this runs inside load() and therefore inside the editor's
+        // scene reopen, where anything blocking is charged to the editor's startup. The reads
+        // themselves happen in process_external_tileset_queue(), a few per frame.
+        external_queue_.clear();
+        enqueue_external_descendants( *root );
     }
 
-    void Tileset3D::expand_external_tileset( core::Tile &tile, int depth )
+    void Tileset3D::enqueue_external_descendants( core::Tile &tile )
     {
-        // A real dataset nests a handful of levels; anything past this is a cyclic or
-        // runaway chain of references.
-        constexpr int kMaxDepth = 32;
-        if ( depth > kMaxDepth )
+        if ( tile.content.has_value() && is_external_tileset_uri( tile.content->uri ) )
+        {
+            // Once only. A container that already carries the external root's children has been
+            // merged, and queueing it again would read the same document forever.
+            if ( tile.children.empty() )
+            {
+                external_queue_.push_back( &tile );
+            }
+        }
+
+        for ( const std::unique_ptr<core::Tile> &child : tile.children )
+        {
+            enqueue_external_descendants( *child );
+        }
+    }
+
+    void Tileset3D::process_external_tileset_queue()
+    {
+        if ( external_queue_.empty() )
         {
             return;
         }
 
-        if ( tile.content.has_value() && is_external_tileset_uri( tile.content->uri ) )
+        // A time budget, not a document count: these documents differ in size by orders of
+        // magnitude, and the thing to protect is the frame, not the number of round trips.
+        const double deadline =
+            document_now_seconds() + kExternalQueueBudgetSeconds;
+        int merged_this_frame = 0;
+        while ( !external_queue_.empty() && document_now_seconds() < deadline )
+        {
+            core::Tile *tile = external_queue_.front();
+            external_queue_.pop_front();
+            if ( tile == nullptr )
+            {
+                continue;
+            }
+            merge_external_tileset( *tile );
+            // The document just spliced in brings its own children, and those may hold further
+            // nested tilesets.
+            for ( const std::unique_ptr<core::Tile> &child : tile->children )
+            {
+                enqueue_external_descendants( *child );
+            }
+            ++merged_this_frame;
+        }
+
+        if ( merged_this_frame > 0 )
+        {
+            // A merged document changes the tree the traversal sees, so the counts derived from
+            // it (tile count, bounding volumes, the debug mesh) are stale until the next rebuild.
+            // Nothing has to be told: the traversal reads the tree directly every frame.
+        }
+    }
+
+    void Tileset3D::merge_external_tileset( core::Tile &tile )
+    {
         {
             const String nestedPath = content_path( tile );
 
@@ -1366,11 +1421,6 @@ namespace tiles3d
                 // as if it were a mesh. The tile degenerates into a plain container.
                 tile.content.reset();
             }
-        }
-
-        for ( const std::unique_ptr<core::Tile> &child : tile.children )
-        {
-            expand_external_tileset( *child, depth + 1 );
         }
     }
 
@@ -2024,6 +2074,11 @@ namespace tiles3d
             return;
         }
 
+        // Nested tileset documents first, so the traversal this frame sees as much of the real
+        // tree as the budget allowed. Bounded by time, so a frame is never spent on documents
+        // alone - which is what used to stall the editor's scene reopen.
+        process_external_tileset_queue();
+
         // suspend_update: hold the selection where it is. The tree stays loaded and the
         // visibility of what is already selected is untouched, so the camera can be moved
         // (and the previous frame's result photographed) without the LOD chasing it - which is
@@ -2144,8 +2199,18 @@ namespace tiles3d
                                                           view.viewportHeight, view.fovDegrees );
         tile.screenSpaceError = sse;
 
-        const bool hasContentUri = tile.content.has_value();
-        const bool contentReady = tile.contentState == core::ContentState::Ready;
+        // A container for a nested tileset document is not content, and must never be requested
+        // as if it were: the document arrives through the external-tileset queue (see
+        // queue_external_tilesets), one budgeted read per frame. While that is still pending the
+        // tile has a .json "content" URI, and asking the mesh pipeline for it produces a parse
+        // failure that then counts as a spent retry - which is how a tree that is still filling in
+        // ends up selected-but-empty (measured on taiwan: 1008 tiles rendered, 321 with content,
+        // because the rest had already burned their attempt on a tileset.json).
+        const bool content_is_document =
+            tile.content.has_value() && is_external_tileset_uri( tile.content->uri );
+        const bool hasContentUri = tile.content.has_value() && !content_is_document;
+        const bool contentReady =
+            tile.contentState == core::ContentState::Ready && !content_is_document;
 
         // Ported line for line from the reference scheduler
         // (web-spatial-examples/.../threeDTiles/index.ts:1801-1815). The reference is the
