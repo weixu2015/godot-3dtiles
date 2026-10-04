@@ -299,10 +299,14 @@ namespace tiles3d
             const bool needsNormals =
                 primitive.normals.empty() && material != nullptr && !material->unlit;
 
-            // Expanded copies when flat normals are generated; otherwise these start as
-            // copies of the primitive's own data.
+            // Copies of the primitive's own data. The normals used to be left empty here and
+            // only filled in by the flat-normal path below, which meant a primitive that SHIPPED
+            // normals lost them: the mesh reached the GPU with no NORMAL array, a lit material
+            // had nothing for the Lambert term, and every such dataset rendered black under a
+            // DirectionalLight3D while staying lit by ambient (which does not use normals). The
+            // datasets that looked right were exactly the ones whose materials are unlit.
             std::vector<float> positions = primitive.positions;
-            std::vector<float> normals;
+            std::vector<float> normals = primitive.normals;
             std::vector<float> texcoords0 = primitive.texcoords0;
             std::vector<float> colors = primitive.colors;
             std::vector<std::uint32_t> indices = primitive.indices;

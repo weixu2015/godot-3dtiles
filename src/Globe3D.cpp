@@ -31,6 +31,7 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -1371,6 +1372,41 @@ namespace tiles3d
 
         sun_->set_global_transform(
             godot::Transform3D( camera->get_global_basis(), centre_global ) );
+
+        // Geometric occlusion instead of the depth buffer. The disc the sun has to hide behind
+        // is mostly drawn by the transparent atmosphere passes, and transparent passes never
+        // write depth - the sprite's depth test only ever sees the opaque tile meshes, so from
+        // the night side, where no tile sits between the camera and the sun, the glow bleeds
+        // straight through the planet. A ray-ellipsoid test in the same space the sprite was
+        // just placed in needs no depth buffer at all. The eye and the ray are squashed on Y so
+        // the ellipsoid becomes a sphere; that transform is exact, so the test stays exact.
+        const Vector3 globe_centre =
+            atmosphere_ != nullptr ? atmosphere_->get_global_position() : get_global_position();
+        const Vector3 eye = camera_global - globe_centre;
+        const double squash = kEllipsoidRadiiX / kEllipsoidRadiiY;
+        const Vector3 eye_squashed( eye.x, static_cast<float>( static_cast<double>( eye.y ) * squash ),
+                                    eye.z );
+        const Vector3 ray_squashed = Vector3( direction.x,
+                                              static_cast<float>( static_cast<double>( direction.y ) * squash ),
+                                              direction.z ).normalized();
+        const double along = -static_cast<double>( eye_squashed.dot( ray_squashed ) );
+        const Vector3 closest = eye_squashed + ray_squashed * static_cast<float>( along );
+        const double perp = static_cast<double>( closest.length() );
+        // Fade over the width the sun's own disc subtends, so the sprite dissolves while the
+        // planet's limb crosses it instead of popping when its centre line enters the rock.
+        const double fade = std::max( std::tan( angular_radius ) * pin_distance, 1.0 );
+        double visible = ( perp - ( kEllipsoidRadiiX - fade ) ) / ( 2.0 * fade );
+        visible = std::clamp( visible, 0.0, 1.0 );
+        visible = visible * visible * ( 3.0 - 2.0 * visible );
+        if ( godot::Ref<godot::Material> sun_material = sun_->get_material_override();
+             sun_material.is_valid() )
+        {
+            if ( StandardMaterial3D *standard =
+                     godot::Object::cast_to<StandardMaterial3D>( *sun_material ) )
+            {
+                standard->set_albedo( Color( 1.0f, 1.0f, 1.0f, static_cast<float>( visible ) ) );
+            }
+        }
     }
 
     godot::Node3D *Globe3D::find_camera() const

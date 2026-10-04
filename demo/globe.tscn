@@ -1,16 +1,16 @@
 [gd_scene format=3 uid="uid://cglobemain1"]
 
 [ext_resource type="Script" uid="uid://c8rswhbasgo4m" path="res://globe.gd" id="1_globe"]
+[ext_resource type="Shader" path="res://skybox/sky_cube.gdshader" id="2_shadersky"]
+[ext_resource type="Script" path="res://skybox/sky_cube_loader.gd" id="3_skyloader"]
 
-[sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
-sky_top_color = Color(0.004, 0.006, 0.018, 1)
-sky_horizon_color = Color(0.004, 0.006, 0.018, 1)
-ground_bottom_color = Color(0.004, 0.006, 0.018, 1)
-ground_horizon_color = Color(0.004, 0.006, 0.018, 1)
-sun_angle_max = 0.0
+[sub_resource type="ShaderMaterial" id="Sky_3"]
+render_priority = 0
+shader = ExtResource("2_shadersky")
 
 [sub_resource type="Sky" id="Sky_2"]
-sky_material = SubResource("Sky_1")
+sky_material = SubResource("Sky_3")
+radiance_size = 3
 
 [sub_resource type="Environment" id="Env_1"]
 background_mode = 2
@@ -31,6 +31,7 @@ script = ExtResource("1_globe")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1713991585]
 environment = SubResource("Env_1")
+script = ExtResource("3_skyloader")
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=661745553]
 transform = Transform3D(0.70710677, -0.35355338, 0.61237246, 0, 0.8660254, 0.5, -0.70710677, -0.35355338, 0.61237246, 0, 0, 0)
