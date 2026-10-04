@@ -131,6 +131,24 @@ func _ready() -> void:
 							str(tmat.get_shader_parameter("u_uv_offset")),
 							str(tmat.shader != null)])
 		print("ground: %d tile ShaderMaterials, %d with imagery" % [probed, textured])
+		# Negative control for the RTC offset.
+		#
+		# Tile vertices are authored relative to the tile's own centre and the centre is handed
+		# to the ground shader as u_tile_center (Godot's VERTEX is model space, so the node's
+		# translation is not in it). Zeroing that uniform on a build that is otherwise correct
+		# reproduces the pre-fix render exactly: every tile gets shaded as though it sat on the
+		# frame's origin. Same binary, same tiles, same camera - so the A/B isolates the one
+		# term, with no reliance on a stored PNG whose provenance nobody can re-derive.
+		if OS.get_environment("GLOBE_ZERO_TILE_CENTER") != "":
+			var zeroed := 0
+			for child in layer.get_children(true):
+				if child is MeshInstance3D:
+					var zmat := (child as MeshInstance3D).material_override as ShaderMaterial
+					if zmat == null:
+						continue
+					zmat.set_shader_parameter("u_tile_center", Vector3.ZERO)
+					zeroed += 1
+			print("ground: NEGATIVE CONTROL u_tile_center forced to 0 on %d tiles" % zeroed)
 		if probed == 0:
 			print("ground: FAIL no tile material is a ShaderMaterial - the veil is not on the tiles")
 		elif textured == 0:
@@ -200,6 +218,15 @@ func _ready() -> void:
 	var forced_cam := OS.get_environment("GLOBE_CAM_RADIUS")
 	if forced_cam != "":
 		cam_radius = float(forced_cam)
+	# Control for the origin shift: with it off, the frame origin stays on the georeference
+	# anchor and every coordinate is the Earth-sized one. Two renders that differ between
+	# shift-on and shift-off are the direct test that re-basing is *invariant* - which is the
+	# whole claim the feature makes, and the only way to tell "a rebase missed a node" apart
+	# from "the stored baseline PNG is simply stale".
+	if camera != null and OS.get_environment("GLOBE_NO_ORIGIN_SHIFT") != "":
+		camera.call("set_origin_shift_enabled", false)
+		print("camera: origin shift DISABLED for this run (invariance control)")
+
 	if camera != null:
 		camera.call("orbit_to", 105.0, 25.0, cam_radius)
 

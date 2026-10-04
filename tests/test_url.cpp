@@ -11,6 +11,7 @@
 
 #include "io/Url.h"
 
+using tiles3d::core::encodeUrlPath;
 using tiles3d::core::hasUrlScheme;
 using tiles3d::core::isRemoteUrl;
 using tiles3d::core::normalizePath;
@@ -167,4 +168,39 @@ TEST_CASE( "splitUrl handles userinfo and IPv6 authorities" )
     const auto ipv6 = splitUrl( "http://[::1]:9090/a" );
     CHECK( ipv6.host == "[::1]" );
     CHECK( ipv6.port == 9090 );
+}
+
+TEST_CASE( "encodeUrlPath makes a dataset path requestable without double-encoding" )
+{
+    // The datasets on this machine live under "3D Tiles/". Unencoded, the space ends the
+    // request target and the server answers a request for "/3D" with 404.
+    CHECK( encodeUrlPath( "/3D Tiles/weinan/tileset.json" ) ==
+           "/3D%20Tiles/weinan/tileset.json" );
+
+    // An escape the author already wrote has to survive: encoding the '%' would turn "%20"
+    // into "%2520" and the server would look for a file literally named "%20".
+    CHECK( encodeUrlPath( "/3D%20Tiles/a.json" ) == "/3D%20Tiles/a.json" );
+    CHECK( encodeUrlPath( "/a%2Fb" ) == "/a%2Fb" );
+
+    // Query syntax and the separators that may stay literal are untouched.
+    CHECK( encodeUrlPath( "/tiles/x.jpeg?n=z&g=11404" ) == "/tiles/x.jpeg?n=z&g=11404" );
+    CHECK( encodeUrlPath( "/a-b_c.d~e:f@g;h+i,j(k)l'm!n$o*p=q" ) ==
+           "/a-b_c.d~e:f@g;h+i,j(k)l'm!n$o*p=q" );
+
+    // Characters that would break out of the request target are escaped.
+    CHECK( encodeUrlPath( "/a\"b<c>d\\e^f`g|h{i}j" ) ==
+           "/a%22b%3Cc%3Ed%5Ce%5Ef%60g%7Ch%7Bi%7Dj" );
+
+    // Non-ASCII arrives as UTF-8 bytes and is escaped one byte at a time: 中 is E4 B8 AD.
+    CHECK( encodeUrlPath( "/\xe4\xb8\xad" ) == "/%E4%B8%AD" );
+
+    // A trailing '%' that is not an escape is escaped itself, and empty stays empty.
+    CHECK( encodeUrlPath( "/a%" ) == "/a%25" );
+    CHECK( encodeUrlPath( "" ) == "" );
+
+    // Round trip through splitUrl: this is the exact pair the loader uses.
+    const auto parts = splitUrl( "http://localhost:9090/3D Tiles/weinan/tileset.json" );
+    CHECK( parts.host == "localhost" );
+    CHECK( parts.port == 9090 );
+    CHECK( encodeUrlPath( parts.path ) == "/3D%20Tiles/weinan/tileset.json" );
 }

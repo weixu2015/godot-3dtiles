@@ -48,6 +48,18 @@ var _was_flying := false
 # Set between "the picker asked for a dataset" and "that dataset finished loading": the load
 # handler has to know whether to fly, or whether it is just a first load reporting in.
 var _pending_flight := false
+# Seconds a switch is allowed to take before it is declared dead. Without a deadline a URL
+# that never answers leaves the picker wedged - no flight, no error, and the *next* load
+# would fire the stale one.
+const SWITCH_TIMEOUT_SECONDS := 20.0
+# How many frames home() keeps re-asking for a readable dataset before giving up on it.
+const HOME_RETRY_FRAMES := 240
+
+# Incremented on every pick; a load handler that finishes after the user picked something else
+# compares its token and stays out of the way.
+var _switch_token := 0
+var _switch_deadline_ms := 0
+var _home_retry := 0
 
 func _ready() -> void:
 	_camera = get_node_or_null("GlobeCameraController")
@@ -92,7 +104,12 @@ func _on_dataset_selected(index: int) -> void:
 		home()
 		return
 
+	# Every switch takes a token. A load that finishes after the user picked something else
+	# must not fly: without this, picking A, then B, and having A land last sends the camera
+	# to A while the picker says B.
+	_switch_token += 1
 	_pending_flight = true
+	_switch_deadline_ms = Time.get_ticks_msec() + int(SWITCH_TIMEOUT_SECONDS * 1000.0)
 	_status.text = "loading %s ..." % entry["label"]
 	_tileset.set_url(wanted)
 	# reload() rather than load(): load() on a live tileset would keep the old tree around
@@ -104,15 +121,35 @@ func _on_tileset_loaded() -> void:
 		_update_status()
 		return
 	_pending_flight = false
-	_sync_anchor_to_dataset()
-	# Deferred: the anchor change re-resolves the frame and rebuilds both meshes this frame,
-	# and the flight distance is measured through the globe's frame.
-	home.call_deferred()
+	_switch_deadline_ms = 0
+
+	var token := _switch_token
+	_status.text = "rebasing the origin onto the dataset ..."
+	await _rebase_to_dataset()
+	if token != _switch_token:
+		return
+	home()
 
 func _on_load_failed(reason: String) -> void:
+	# A failed switch used to leave the flight pending forever, so the *next* successful load
+	# flew on its own. A URL that never arrives - see encodeUrlPath: a raw space in the path
+	# makes the server answer 404 - then looked exactly like "the fly-in button stopped
+	# working". Clear the state and say so.
 	_pending_flight = false
+	_switch_deadline_ms = 0
 	if _status != null:
 		_status.text = "load failed: %s" % reason
+
+# The geodetic origin authority of the scene's Georeference3D, or null when the scene has none
+# or it carries an ECEF anchor instead.
+func _anchor_authority() -> Resource:
+	var geo := get_node_or_null("Georeference3D")
+	if geo == null:
+		return null
+	var authority: Resource = geo.get("origin_authority")
+	if authority == null or not authority.has_method("set_longitude"):
+		return null
+	return authority
 
 # Moves the ENU origin onto the dataset.
 #
@@ -127,12 +164,13 @@ func _on_load_failed(reason: String) -> void:
 # the authority on where it is: a converter that wrote a placeholder origin still reports its
 # real position, and the anchor has to agree with that, not with what the URL was expected to
 # contain.
-func _sync_anchor_to_dataset() -> void:
-	var geo := get_node_or_null("Georeference3D")
-	if geo == null or _tileset == null:
-		return
-	var authority: Resource = geo.get("origin_authority")
-	if authority == null or not authority.has_method("set_longitude"):
+#
+# Split across frames on purpose. Re-pointing the origin invalidates the globe mesh AND the
+# imagery mesh, and both rebuilds are main-thread work; running them in the same frame as the
+# new dataset's first upload is what makes a switch hitch.
+func _rebase_to_dataset() -> void:
+	var authority := _anchor_authority()
+	if authority == null or _tileset == null:
 		return
 
 	var lon: float = _tileset.get_dataset_longitude()
@@ -152,9 +190,12 @@ func _sync_anchor_to_dataset() -> void:
 	var globe := get_node_or_null("Georeference3D/Globe3D")
 	if globe != null:
 		globe.call("rebuild")
+		await get_tree().process_frame
+
 	var layer := get_node_or_null("Georeference3D/GlobeTileLayer")
 	if layer != null:
 		layer.call("reload_tiles")
+		await get_tree().process_frame
 
 # One float32 representable step at `magnitude`. Everything in a Godot transform is float32
 # unless the engine is built with double precision, so this is the floor on how precisely a
@@ -180,10 +221,21 @@ func home() -> void:
 
 	var radius: float = _tileset.get_dataset_radius()
 	if radius <= 0.0:
-		_status.text = "Tileset3D has not loaded yet"
-		# Still give a useful answer: fall back to the globe overview.
-		_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
+		# The load signal can arrive while the tree is still half-built: reload() tears the
+		# previous dataset down and the first frames after that run against a root whose
+		# bounding volume is not readable yet. Falling back to the opening viewpoint here is
+		# what made the picker "often" fail - one run in a handful flew to the overview
+		# instead of the dataset (measured: |p| = 1.63e7, exactly the opening orbit). Retry for
+		# a bounded number of frames instead, and only fall back once that is exhausted.
+		if _home_retry > 0:
+			_home_retry -= 1
+			_status.text = "waiting for the dataset to become readable ..."
+		else:
+			_home_retry = HOME_RETRY_FRAMES
+			_status.text = "Tileset3D has not loaded yet"
+			_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
 		return
+	_home_retry = 0
 
 	var lat: float = _tileset.get_dataset_latitude()
 	var lon: float = _tileset.get_dataset_longitude()
@@ -263,11 +315,23 @@ func _update_status(prefix: String = "") -> void:
 func _process(_delta: float) -> void:
 	if _camera == null:
 		return
+
+	# A switch with no answer must expire rather than sit there.
+	if _pending_flight and _switch_deadline_ms > 0 and Time.get_ticks_msec() > _switch_deadline_ms:
+		_pending_flight = false
+		_switch_deadline_ms = 0
+		if _status != null:
+			_status.text = "switch timed out after %.0f s: nothing loaded" % SWITCH_TIMEOUT_SECONDS
+
 	# The status line has to settle too, otherwise "flying to ..." stays on screen for good.
 	var flying: bool = _camera.call("is_flying")
 	if _was_flying and not flying:
 		_update_status()
 	_was_flying = flying
+
+	# A flight that could not start because the dataset was not readable yet retries here.
+	if _home_retry > 0 and not flying:
+		home()
 
 # Points the scene's DirectionalLight3D at the same place the globe's atmosphere is lit
 # from.

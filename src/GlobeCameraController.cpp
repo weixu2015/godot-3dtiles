@@ -4,6 +4,8 @@
 
 #include "Georeference3D.h"
 #include "Globe3D.h"
+#include "GlobeTileLayer.h"
+#include "Tileset3D.h"
 
 #include "core/math/GeoMath.h"
 #include "core/math/Mat4.h"
@@ -71,6 +73,11 @@ namespace tiles3d
         /// How much of an atmosphere shell the far plane has to cover past the ellipsoid.
         /// Globe3D defaults to 1.06 radii, so 1.2 has room to spare.
         constexpr double kAtmosphereHeadroom = 1.2;
+
+        /// Below this the camera is already sitting on the frame origin and a shift would be a
+        /// no-op. Without it the threshold-0 ("every frame") mode would rebuild the globe
+        /// surface sixty times a second for a parked camera, moving the origin by nothing.
+        constexpr double kOriginShiftEpsilon = 1e-3;
 
         /// Rotation-based direction interpolation that survives the near-antipodal case.
         ///
@@ -250,6 +257,31 @@ namespace tiles3d
                               &GlobeCameraController::resolve_ellipsoid_center );
         ClassDB::bind_method( D_METHOD( "camera_height_above_ellipsoid" ),
                               &GlobeCameraController::camera_height_above_ellipsoid );
+
+        ClassDB::bind_method( D_METHOD( "set_origin_shift_enabled", "p_enabled" ),
+                              &GlobeCameraController::set_origin_shift_enabled );
+        ClassDB::bind_method( D_METHOD( "get_origin_shift_enabled" ),
+                              &GlobeCameraController::get_origin_shift_enabled );
+        ClassDB::add_property( "GlobeCameraController",
+                               PropertyInfo( Variant::BOOL, "origin_shift_enabled" ),
+                               "set_origin_shift_enabled", "get_origin_shift_enabled" );
+
+        ClassDB::bind_method( D_METHOD( "set_origin_shift_threshold", "p_metres" ),
+                              &GlobeCameraController::set_origin_shift_threshold );
+        ClassDB::bind_method( D_METHOD( "get_origin_shift_threshold" ),
+                              &GlobeCameraController::get_origin_shift_threshold );
+        ClassDB::add_property( "GlobeCameraController",
+                               PropertyInfo( Variant::FLOAT, "origin_shift_threshold" ),
+                               "set_origin_shift_threshold", "get_origin_shift_threshold" );
+
+        ClassDB::bind_method( D_METHOD( "shift_origin_now" ),
+                              &GlobeCameraController::shift_origin_now );
+        ClassDB::bind_method( D_METHOD( "get_origin_shift_count" ),
+                              &GlobeCameraController::get_origin_shift_count );
+        ClassDB::bind_method( D_METHOD( "get_origin_shift_milliseconds" ),
+                              &GlobeCameraController::get_origin_shift_milliseconds );
+        ClassDB::bind_method( D_METHOD( "get_origin_shift_distance" ),
+                              &GlobeCameraController::get_origin_shift_distance );
     }
 
     void GlobeCameraController::_notification( int p_what )
@@ -265,6 +297,10 @@ namespace tiles3d
                 update_fly( get_process_delta_time() );
                 update_zoom_easing( get_process_delta_time() );
                 update_drag_inertia( get_process_delta_time() );
+                // After every pose writer, so the origin moves from - and the camera is put
+                // back at - the pose this frame will actually be drawn with. A shift never
+                // changes that pose, only the numbers that express it.
+                update_origin_shift();
                 // After the pose update, so the planes match the frame that is about to be
                 // drawn rather than the previous one.
                 update_clip_planes();
@@ -571,17 +607,34 @@ namespace tiles3d
         const double height = std::max( camera_height_above_ellipsoid(), 1.0 );
         const double near_value = clampd( height * 0.02, 1.0, 1.0e6 );
 
-        // far only ever grows: the whole ellipsoid plus the atmosphere shell has to stay in
-        // the frustum from wherever the camera is, and no Scene author should have to know
-        // that number.
+        // far tracks the altitude too, and - unlike the old version - it is allowed to COME
+        // BACK DOWN. A grow-only far is a one-way ratchet: a scene authored with far = 2e8
+        // (the "whole planet and then some" number) keeps it forever, and at 2e8 the engine's
+        // light culler cannot build its frustum in float32, which is the
+        //   create_frustum_points: Condition "!res" is true
+        // spam - hundreds of lines per second. The plane has to be sized for what is actually
+        // in front of the camera, not for the worst case that ever existed.
+        //
+        // Everything past the planet's silhouette is behind the planet, so "what is actually
+        // in front" is: the distance to the limb, plus the air the grazing ray crosses on its
+        // way in and out of the shell (that last stretch is the horizon glow, and it is real
+        // pixels, so it cannot be clipped).
         const Vector3 pivot = resolve_pivot();
         const double centre_distance = static_cast<double>( ( get_position() - pivot ).length() );
-        const double required_far =
-            centre_distance + math::kWgs84SemiMajorAxis * kAtmosphereHeadroom;
-        if ( static_cast<double>( get_far() ) < required_far )
-        {
-            set_far( static_cast<float>( required_far ) );
-        }
+        const double radius = math::kWgs84SemiMajorAxis;
+        const double shell_radius = radius * kAtmosphereHeadroom;
+        const auto squared = []( const double v ) { return v * v; };
+        // Distance from the camera to the planet's silhouette (the tangent point). Zero for a
+        // camera on the ground.
+        const double limb =
+            std::sqrt( std::max( squared( centre_distance ) - squared( radius ), 0.0 ) );
+        // How much further the same grazing ray runs before it leaves the shell: it is at its
+        // closest at the limb, so the exit is one shell thickness beyond it (~4200 km at WGS84
+        // with this headroom). That stretch is the horizon glow, and it is real pixels.
+        const double air =
+            std::sqrt( std::max( squared( shell_radius ) - squared( radius ), 0.0 ) );
+        const double required_far = clampd( limb + air + radius * 0.01, 1.0e4, 1.0e8 );
+        set_far( static_cast<float>( required_far ) );
         set_near( static_cast<float>( near_value ) );
     }
 
@@ -624,6 +677,218 @@ namespace tiles3d
             return 0.0;
         }
         return offset.radius * ( 1.0 - 1.0 / offset.scaled_length );
+    }
+
+    // ---- floating origin ----
+
+    void GlobeCameraController::set_origin_shift_enabled( const bool p_enabled )
+    {
+        origin_shift_enabled_ = p_enabled;
+    }
+
+    bool GlobeCameraController::get_origin_shift_enabled() const
+    {
+        return origin_shift_enabled_;
+    }
+
+    void GlobeCameraController::set_origin_shift_threshold( const double p_metres )
+    {
+        origin_shift_threshold_ = p_metres < 0.0 ? 0.0 : p_metres;
+    }
+
+    double GlobeCameraController::get_origin_shift_threshold() const
+    {
+        return origin_shift_threshold_;
+    }
+
+    int GlobeCameraController::get_origin_shift_count() const
+    {
+        return origin_shift_count_;
+    }
+
+    double GlobeCameraController::get_origin_shift_milliseconds() const
+    {
+        return origin_shift_milliseconds_;
+    }
+
+    double GlobeCameraController::get_origin_shift_distance() const
+    {
+        return origin_shift_distance_;
+    }
+
+    Vector3 GlobeCameraController::delta_in_parent_space( const godot::Node3D *p_carrier,
+                                                          const godot::Node3D *p_node,
+                                                          const math::Vec3 &p_local_delta ) const
+    {
+        const godot::Node3D *parent_3d =
+            p_node != nullptr ? Object::cast_to<godot::Node3D>( p_node->get_parent() ) : nullptr;
+        if ( p_carrier == nullptr || parent_3d == nullptr )
+        {
+            return Vector3();
+        }
+
+        // A delta is a vector, so carry two points through the same transforms and keep the
+        // difference - the idiom frame_direction_to_parent() already uses, and for the same
+        // reason: one conversion path to trust rather than a hand-composed basis.
+        const Vector3 origin_world = p_carrier->to_global( Vector3() );
+        const Vector3 tip_world = p_carrier->to_global(
+            Vector3( static_cast<float>( p_local_delta.x ), static_cast<float>( p_local_delta.y ),
+                     static_cast<float>( p_local_delta.z ) ) );
+        return parent_3d->to_local( tip_world ) - parent_3d->to_local( origin_world );
+    }
+
+    void GlobeCameraController::rebase_content( const math::Vec3 &p_local_delta )
+    {
+        // Walking the carrier's children rather than keeping a registry is deliberate: the
+        // list is short, a shift is rare, and a registry is one more thing to forget to update
+        // when a new content node type lands. Everything that authors geometry in the frame's
+        // local space hangs off the Georeference3D - that is the whole point of the shared
+        // frame (docs/GLOBE_PLAN.md 3).
+        godot::Node3D *carrier = const_cast<godot::Node3D *>( resolve_frame_node() );
+        if ( carrier == nullptr )
+        {
+            return;
+        }
+
+        for ( int index = 0; index < carrier->get_child_count(); ++index )
+        {
+            godot::Node *child = carrier->get_child( index );
+
+            if ( GlobeTileLayer *layer = Object::cast_to<GlobeTileLayer>( child ); layer != nullptr )
+            {
+                // Re-derives each tile's placement from its cached ECEF centre: one transform
+                // write per live tile, no vertex work.
+                layer->rebase();
+                continue;
+            }
+            if ( Globe3D *globe = Object::cast_to<Globe3D>( child ); globe != nullptr )
+            {
+                // The expensive one: the surface is baked in local space, so it is rebuilt.
+                globe->rebase();
+                continue;
+            }
+            if ( Tileset3D *tileset = Object::cast_to<Tileset3D>( child ); tileset != nullptr )
+            {
+                // Only the already-attached content needs this; the next traversal re-derives
+                // every matrix from the moved frame on its own.
+                tileset->rebase( delta_in_parent_space( carrier, tileset, p_local_delta ) );
+                continue;
+            }
+        }
+    }
+
+    bool GlobeCameraController::shift_origin_now()
+    {
+        // Only a Georeference3D can carry a moved origin. The fallback frame *is* Y-up ECEF, so
+        // "move the origin" would mean "move the Earth's centre" - and a scene that falls back
+        // to it has no dataset in it to jitter anyway.
+        godot::Node3D *carrier = const_cast<godot::Node3D *>( resolve_frame_node() );
+        Georeference3D *reference = Object::cast_to<Georeference3D>( carrier );
+        if ( reference == nullptr )
+        {
+            return false;
+        }
+
+        godot::Time *clock = Time::get_singleton();
+        const double started_usec =
+            clock != nullptr ? static_cast<double>( clock->get_ticks_usec() ) : 0.0;
+
+        // 1. Where the camera is, taken all the way out to ECEF through the frame that is about
+        //    to be replaced. This is the invariant the whole operation preserves: the *numbers*
+        //    describing the camera change, the camera's place on the planet does not. Going via
+        //    ECEF rather than translating by a running delta is also what stops a long run of
+        //    shifts from accumulating a drift.
+        const GlobeFrame old_frame = frame();
+        const Vector3 camera_local = frame_point_from_parent( get_position() );
+        const math::Vec3 camera_ecef = old_frame.to_ecef_z_up(
+            math::Vec3( static_cast<double>( camera_local.x ),
+                        static_cast<double>( camera_local.y ),
+                        static_cast<double>( camera_local.z ) ) );
+        if ( glm::length( camera_ecef ) < 1.0 )
+        {
+            // The camera is at the Earth's centre: no usable origin there, and the georeference
+            // refuses a degenerate one anyway.
+            return false;
+        }
+
+        const Vector3 declared_origin = reference->get_frame_origin_ecef();
+        const math::Vec3 old_origin( static_cast<double>( declared_origin.x ),
+                                     static_cast<double>( declared_origin.y ),
+                                     static_cast<double>( declared_origin.z ) );
+
+        // 2. Move the origin onto the camera. The frame's basis stays frozen on the *declared*
+        //    anchor (Georeference3D::rebase_origin_ecef), so this is a pure translation and
+        //    every orientation in the scene survives untouched - the camera's included. That is
+        //    not a convenience: re-deriving the ENU basis at the camera instead would rotate
+        //    the world by the meridian convergence between the two points, 0.009 deg per km.
+        reference->rebase_origin_ecef( Vector3( static_cast<float>( camera_ecef.x ),
+                                               static_cast<float>( camera_ecef.y ),
+                                               static_cast<float>( camera_ecef.z ) ) );
+
+        // 3. Put the camera back where it was, re-expressed through the frame that just moved.
+        //    Together with the content move below this is the whole mechanism: content and
+        //    camera are translated by the same world vector, so the rendered image is identical
+        //    and only the magnitudes changed.
+        const GlobeFrame new_frame = frame();
+        const math::Vec3 new_local = new_frame.to_local( camera_ecef );
+        set_position( frame_point_to_parent( Vector3( static_cast<float>( new_local.x ),
+                                                      static_cast<float>( new_local.y ),
+                                                      static_cast<float>( new_local.z ) ) ) );
+
+        // 4. Re-place the content. `to_local(old_origin)` under the new frame is exactly how far
+        //    local coordinates moved, which is the delta every consumer needs - and the one
+        //    number worth reporting, since it is the magnitude that just stopped being quantised.
+        const math::Vec3 local_delta = new_frame.to_local( old_origin );
+        rebase_content( local_delta );
+
+        origin_shift_distance_ = glm::length( local_delta );
+        origin_shift_count_ += 1;
+        if ( clock != nullptr )
+        {
+            origin_shift_milliseconds_ =
+                ( static_cast<double>( clock->get_ticks_usec() ) - started_usec ) / 1000.0;
+        }
+        return true;
+    }
+
+    void GlobeCameraController::update_origin_shift()
+    {
+        // How far the camera has strayed from the frame's origin, measured in the frame's own
+        // local space - which is precisely the space whose coordinates are about to be rounded
+        // to float32. This is the number the threshold is compared against, and the one a HUD
+        // should show, because it *is* the quantisation scale divided by 2^-24.
+        //
+        // Computed even while the feature is off: with the shift disabled this readout is the
+        // measurement that says how much precision is being left on the table.
+        const Vector3 camera_local = frame_point_from_parent( get_position() );
+        origin_shift_distance_ = static_cast<double>( camera_local.length() );
+
+        if ( !origin_shift_enabled_ )
+        {
+            return;
+        }
+
+        // With the camera already on the origin there is nothing to regain. This is what keeps
+        // threshold 0 ("every frame") from rebuilding the globe surface sixty times a second
+        // for a parked camera.
+        if ( origin_shift_distance_ < kOriginShiftEpsilon )
+        {
+            return;
+        }
+
+        // Strictly less-than, so a threshold of 0 shifts on every frame that moves at all -
+        // the strictest form of the technique, and the most expensive.
+        if ( origin_shift_distance_ < origin_shift_threshold_ )
+        {
+            return;
+        }
+
+        // Deliberately not gated on is_flying(): a flight across the planet is exactly when the
+        // coordinates need keeping in check. Nothing in the flight state depends on the origin -
+        // the stored directions are parent-space unit vectors and the distances are scalars -
+        // and update_fly() re-derives the camera position from the pivot every frame, so a
+        // shift mid-flight is invisible to it.
+        shift_origin_now();
     }
 
     void GlobeCameraController::enforce_camera_above_ellipsoid()

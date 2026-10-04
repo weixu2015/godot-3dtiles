@@ -24,6 +24,7 @@
 #include "godot_cpp/classes/mesh_instance3d.hpp"
 #include "godot_cpp/classes/node3d.hpp"
 #include "godot_cpp/variant/string.hpp"
+#include "godot_cpp/variant/vector3.hpp"
 
 #include <memory>
 #include <vector>
@@ -306,6 +307,22 @@ namespace tiles3d
 
         /// Drops everything without loading.
         void unload();
+
+        /// Re-places already-attached content after the shared frame's *origin* moved - the
+        /// floating-origin primitive (see GlobeCameraController::shift_origin_now).
+        ///
+        /// The traversal rebuilds every tile matrix from `compute_model_matrix()` each frame,
+        /// so the next frame is correct on its own; what this fixes is the rest of the
+        /// *current* one. The camera controller is the last sibling in the demo scene, so by
+        /// the time it moves the origin this frame's traversal has already run and every
+        /// attached content node is holding a matrix in the old local space. Left alone, the
+        /// whole dataset would be drawn one origin-shift away from the camera for exactly one
+        /// frame - which is the flash a naive floating origin is known for, and the one
+        /// artifact a frame-difference probe can actually see.
+        ///
+        /// `p_parent_delta` is the shift expressed in this node's *parent* space, i.e. the
+        /// georeference frame the traversal's model matrix produces.
+        void rebase( const godot::Vector3 &p_parent_delta );
 
         // ---- where the dataset actually is ----
         //

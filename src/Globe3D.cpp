@@ -388,6 +388,7 @@ namespace tiles3d
                               &Globe3D::compute_sun_direction_y_up );
 
         ClassDB::bind_method( D_METHOD( "rebuild" ), &Globe3D::rebuild );
+        ClassDB::bind_method( D_METHOD( "rebase" ), &Globe3D::rebase );
 
         ClassDB::bind_method( D_METHOD( "geodetic_to_local", "p_longitude_degrees",
                                         "p_latitude_degrees", "p_height" ),
@@ -894,6 +895,30 @@ namespace tiles3d
         // answer.
         surface_visible_applied_ = !show_surface_;
         update_surface_visibility();
+    }
+
+    void Globe3D::rebase()
+    {
+        // The frame is cached here (resolve() walks the ancestor chain for a Georeference3D)
+        // and the georeference invalidated its own cached matrices when it moved, so this
+        // node's copy has to go too or the rebase would be invisible to it.
+        frame_resolved_ = false;
+
+        // Local-space geometry. No node transform to nudge: the vertices themselves are local
+        // coordinates, so they have to be re-derived. This is the expensive half of a rebase
+        // and the reason the controller's threshold is a distance rather than "every frame".
+        rebuild_surface();
+        rebuild_graticule();
+
+        // ECEF-space geometry. The shell's vertices are already in the units the scattering
+        // integral measures in and the node transform does the placing, so re-running the
+        // placement *is* the whole update - the mesh is not touched.
+        apply_ecef_y_up_placement();
+
+        // Shading reads the frame and the viewer position, both of which just changed.
+        // update_atmosphere_uniforms() publishes the frame for the tile material as well, so a
+        // rebase does not leave one frame of atmosphere computed against the old origin.
+        update_atmosphere_uniforms();
     }
 
     void Globe3D::rebuild_surface()

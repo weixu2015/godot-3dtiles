@@ -383,6 +383,7 @@ namespace tiles3d
         ClassDB::bind_method( D_METHOD( "load" ), &Tileset3D::load );
         ClassDB::bind_method( D_METHOD( "reload" ), &Tileset3D::reload );
         ClassDB::bind_method( D_METHOD( "unload" ), &Tileset3D::unload );
+        ClassDB::bind_method( D_METHOD( "rebase", "p_parent_delta" ), &Tileset3D::rebase );
         ClassDB::bind_method( D_METHOD( "dump_tree", "max_depth" ), &Tileset3D::dump_tree );
 
         ClassDB::bind_method( D_METHOD( "get_tile_count" ), &Tileset3D::get_tile_count );
@@ -1078,6 +1079,52 @@ namespace tiles3d
         clear_loaded();
     }
 
+    void Tileset3D::rebase( const Vector3 &p_parent_delta )
+    {
+        // The traversal's model matrix produces coordinates in the georeference frame and the
+        // result is written straight onto content nodes parented to *this* node, so a cached
+        // worldMatrix lives in this node's own space. Taking this node's transform back out is
+        // what keeps the call correct if it is ever moved in the scene.
+        const Vector3 local_delta = get_transform().basis.xform_inv( p_parent_delta );
+        if ( local_delta.length_squared() <= 0.0f )
+        {
+            return;
+        }
+
+        const math::Vec3 delta( static_cast<double>( local_delta.x ),
+                                static_cast<double>( local_delta.y ),
+                                static_cast<double>( local_delta.z ) );
+
+        for ( core::Tile *tile : loaded_tiles )
+        {
+            if ( tile == nullptr )
+            {
+                continue;
+            }
+            auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
+            if ( node == nullptr || !tile->worldMatrix.has_value() )
+            {
+                continue;
+            }
+
+            // Left-multiplying by a translation is exactly adding to the translation column.
+            // Doing it to the cached matrix (rather than only to the node) matters because
+            // sync_content_visibility() re-applies that matrix for every rendered tile, and
+            // would otherwise silently undo the shift on the same frame.
+            math::Vec4 &translation = ( *tile->worldMatrix )[3];
+            translation.x += delta.x;
+            translation.y += delta.y;
+            translation.z += delta.z;
+
+            node->set_transform( toGodotTransform( *tile->worldMatrix ) );
+        }
+
+        // Nothing else here needs invalidating. Tile bounding spheres are re-derived from the
+        // bounding volume and the fresh model matrix by the traversal itself, and the debug
+        // wireframe is a one-shot diagnostic snapshot whose rebuild is not worth paying on
+        // every origin shift - it comes back correct on the next full rebuild.
+    }
+
     void Tileset3D::expand_external_tilesets()
     {
         if ( root == nullptr )
@@ -1541,10 +1588,15 @@ namespace tiles3d
                 return false;
             }
 
-            const std::string requestPath = parts.path;
+            // A request target is a legal URI form, and HTTPClient writes it straight into the
+            // request line. The kernel does not re-encode URLs when it joins them (a written
+            // escape has to survive), so the encoding has to happen exactly here, once, on the
+            // way out: the datasets here live under "3D Tiles/", and an unencoded space makes
+            // the server see a request for "/3D" and answer 404.
+            const std::string requestPath = core::encodeUrlPath( parts.path );
 
-            // Keep the query string out of the request path: HTTPClient's request() takes the
-            // path relative to the host, and the authority was already consumed above.
+            // The path carries the query as well as the separator, which is what the request
+            // target wants - both go in the same field.
             godot::String requestPathGodot = String( requestPath.c_str() );
             if ( !parts.scheme.empty() && parts.scheme != "http" && parts.scheme != "https" )
             {

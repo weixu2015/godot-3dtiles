@@ -116,6 +116,54 @@ namespace tiles3d
         /// Height of the camera above the ellipsoid surface, metres.
         double camera_height_above_ellipsoid() const;
 
+        // ---- floating origin / origin shift ----
+        //
+        // The camera is the only node that knows where the viewer is, and it is also the node
+        // that has to be moved to keep the view unchanged - so it is the natural driver of the
+        // origin shift. The same split Cesium for Unreal draws: UCesiumOriginShiftComponent
+        // sits on the pawn and moves the CesiumGeoreference, and it explicitly requires that
+        // every other object in the level be told about it (a CesiumGlobeAnchorComponent each).
+        //
+        // Why it is needed at all: Godot's transform pipeline is float32 end to end, so every
+        // coordinate that grows large is quantised to `value * 2^-24`. At the ~6.4e6 m of a raw
+        // ECEF coordinate that is 0.38 m - visible as jitter on dense photogrammetry. Moving
+        // the frame's origin onto the camera turns the same error into
+        // `distance_to_camera * 2^-24`, which is sub-pixel at every viewing distance.
+        //
+        // The whole scene - content *and* camera - is translated by the same vector, so the
+        // image is unchanged; only the magnitudes move. That makes this a pure change of
+        // representation, and it is why an automated frame-difference check can demand a
+        // *bit-identical* frame across a shift.
+
+        /// Whether the origin is moved automatically. On by default.
+        void set_origin_shift_enabled( bool p_enabled );
+        bool get_origin_shift_enabled() const;
+
+        /// How far the camera may get from the frame's origin before it is moved, metres.
+        ///
+        /// 0 means "shift every frame": the origin is then always exactly at the camera, which
+        /// is the strictest form of the technique and the most expensive, because the globe
+        /// surface has to be re-derived on every frame (see Globe3D::rebase). The default
+        /// 1000 m bounds the largest local coordinate at ~1e3 m, where a float32 tick is 6e-5 m
+        /// - two orders of magnitude below the pixel at any sane field of view.
+        void set_origin_shift_threshold( double p_metres );
+        double get_origin_shift_threshold() const;
+
+        /// Moves the shared frame's origin onto the camera right now, moving the camera and
+        /// every content node with it. Returns false when there is no Georeference3D to move.
+        bool shift_origin_now();
+
+        /// How many times the origin has been moved since this node was created.
+        int get_origin_shift_count() const;
+
+        /// Wall-clock cost of the last shift, milliseconds. Dominated by the globe surface
+        /// rebuild; a tileset-only scene pays one transform write per attached tile.
+        double get_origin_shift_milliseconds() const;
+
+        /// How far the camera currently is from the frame origin, metres - the number the
+        /// threshold is compared against, and the one that sets the quantisation floor.
+        double get_origin_shift_distance() const;
+
         // ---- Node overrides ----
         // Public because godot-cpp's register_virtuals template has to reach them (the same
         // constraint that applies to _get_configuration_warnings).
@@ -142,6 +190,23 @@ namespace tiles3d
         double zoom_inertia_damping_ = 6.0;
 
         double distance_ = 0.0;
+
+        // ---- floating origin state (see shift_origin_now) ----
+        bool origin_shift_enabled_ = true;
+        double origin_shift_threshold_ = 1000.0;
+        int origin_shift_count_ = 0;
+        double origin_shift_milliseconds_ = 0.0;
+        double origin_shift_distance_ = 0.0;
+
+        /// Per-frame threshold check, called last in NOTIFICATION_PROCESS so it sees the pose
+        /// the frame will actually be drawn with.
+        void update_origin_shift();
+        /// Re-places every content node that authors geometry in the frame's local space.
+        void rebase_content( const math::Vec3 &p_local_delta );
+        /// `p_local_delta` (frame space) as a vector in `p_node`'s parent space.
+        godot::Vector3 delta_in_parent_space( const godot::Node3D *p_carrier,
+                                              const godot::Node3D *p_node,
+                                              const math::Vec3 &p_local_delta ) const;
 
         bool left_dragging_ = false;
         bool right_dragging_ = false;

@@ -80,6 +80,17 @@ namespace tiles3d
         godot::Ref<godot::ImageTexture> texture;
         godot::MeshInstance3D *mesh = nullptr;
 
+        /// The tile's own centre in Z-up ECEF metres, as chosen when the mesh was built.
+        ///
+        /// The mesh vertices are authored *relative to this point* (RTC: relative to centre),
+        /// which is what keeps them small - a level-16 tile is a few hundred metres across, so
+        /// its vertices stay in the micro-metre float32 range instead of the 0.4 m range they
+        /// would have if they were absolute ECEF. `mesh`'s own position carries this offset,
+        /// and because the offset is re-derived from this ECEF point every time the frame
+        /// origin moves, **re-basing the origin costs one transform write per live tile and no
+        /// vertex work at all.**
+        math::Vec3 rtc_center_ecef{ 0.0 };
+
         /// Tile-local mercator UVs, aligned with the mesh vertices (including skirt ring).
         /// Stored so appearance can be re-mapped to an ancestor texture without rebuilding.
         godot::PackedVector2Array base_uvs;

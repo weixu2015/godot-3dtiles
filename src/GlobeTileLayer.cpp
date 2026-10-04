@@ -249,6 +249,7 @@ namespace tiles3d
                                "set_manage_editor_clip", "get_manage_editor_clip" );
 
         ClassDB::bind_method( D_METHOD( "reload_tiles" ), &GlobeTileLayer::reload_tiles );
+        ClassDB::bind_method( D_METHOD( "rebase" ), &GlobeTileLayer::rebase );
 
         ClassDB::bind_method( D_METHOD( "get_rendered_tile_count" ),
                               &GlobeTileLayer::get_rendered_tile_count );
@@ -781,6 +782,61 @@ namespace tiles3d
 
     // ---- traversal ----
 
+    void GlobeTileLayer::rebase()
+    {
+        // The shared frame's origin moved. Every tile mesh is authored relative to its own ECEF
+        // centre, so nothing about the geometry changed - only where those centres land in this
+        // node's local space. One transform write per live tile, and no vertex work.
+        resolve_frame();
+
+        for ( GlobeTile *root : roots_ )
+        {
+            reapply_tile_placement( root );
+        }
+    }
+
+    void GlobeTileLayer::reapply_tile_placement( GlobeTile *tile )
+    {
+        if ( tile == nullptr )
+        {
+            return;
+        }
+
+        // The cached bounding sphere is expressed in the *old* origin's local space, so the
+        // horizon-culling point and the frustum tests would otherwise keep answering for where
+        // the tile used to be. Dropped rather than translated: compute_bounds() samples the
+        // surface again, which is exact and happens lazily anyway.
+        tile->bounds_computed = false;
+        tile->occludee_valid = false;
+
+        if ( tile->mesh != nullptr )
+        {
+            // Re-derived from the ECEF centre, never accumulated off the previous placement, so
+            // a long run of rebases cannot drift.
+            const math::Vec3 center_local = mesh_point( tile->rtc_center_ecef );
+            tile->mesh->set_position( toGodotVector( center_local ) );
+
+            // The shader's copy of the same number. It is not redundant with the node position:
+            // Godot feeds the vertex shader model-space VERTEX, and the model matrix's
+            // translation is applied afterwards, so the ground pass has no other way to recover
+            // where on Earth this tile is. See GlobeAtmosphereShading's u_tile_center.
+            Ref<ShaderMaterial> material = tile->mesh->get_material_override();
+            if ( material.is_valid() )
+            {
+                material->set_shader_parameter( "u_tile_center", toGodotVector( center_local ) );
+            }
+        }
+
+        if ( tile->has_children() )
+        {
+            const int count = tile->child_count();
+            for ( int index = 0; index < count; ++index )
+            {
+                reapply_tile_placement( tile->child( index ) );
+            }
+        }
+    }
+
     void GlobeTileLayer::update_tiles()
     {
         if ( roots_[0] == nullptr )
@@ -1244,6 +1300,21 @@ namespace tiles3d
         positions.resize( top_vertex_count );
         uvs.resize( top_vertex_count );
 
+        // ---- relative-to-centre authoring (see GlobeTile::rtc_center_ecef) ----
+        //
+        // Vertices go in relative to the tile's own centre and the node carries the offset, so
+        // the numbers that reach the GPU are tile-sized instead of Earth-sized. That is what
+        // lets the shared frame's origin move without touching a single vertex: an origin shift
+        // only changes where this centre lands in the layer's local space, so rebase() is one
+        // set_position() per live tile rather than a full re-authoring of every mesh.
+        //
+        // The centre is taken from the *geometry* rectangle (the one the mesh actually spans),
+        // so the skirt, which is mirrored off the rim, stays symmetric about it.
+        const math::Vec3 center_ecef = math::wgs84ToCartesian(
+            0.5 * ( g.west + g.east ), 0.5 * ( g.north + g.south ), 0.0 );
+        const math::Vec3 center_local = mesh_point( center_ecef );
+        tile->rtc_center_ecef = center_ecef;
+
         // Z-up ECEF positions kept alongside, so the skirt normals can be rotated by the
         // frame instead of being reverse-engineered from mapped vertices.
         std::vector<math::Vec3> ecef_positions;
@@ -1273,9 +1344,9 @@ namespace tiles3d
                 const math::Vec3 ecef = math::wgs84ToCartesian( longitude, latitude, 0.0 );
                 const math::Vec3 local = mesh_point( ecef );
                 const int index = row * columns + column_index;
-                positions[index] = Vector3( static_cast<float>( local.x ),
-                                            static_cast<float>( local.y ),
-                                            static_cast<float>( local.z ) );
+                positions[index] = Vector3( static_cast<float>( local.x - center_local.x ),
+                                            static_cast<float>( local.y - center_local.y ),
+                                            static_cast<float>( local.z - center_local.z ) );
                 uvs[index] = Vector2( static_cast<float>( column_index ) / static_cast<float>( segments ),
                                       static_cast<float>( v ) );
                 ecef_positions.push_back( ecef );
@@ -1394,6 +1465,11 @@ namespace tiles3d
         material->set_shader_parameter( "u_base_color",
                                         Vector3( kPlaceholderColor.r, kPlaceholderColor.g,
                                                  kPlaceholderColor.b ) );
+        // The centre the vertices were authored against. The ground shader needs it because
+        // Godot hands it VERTEX in model space, which excludes this node's translation - see
+        // u_tile_center in GlobeAtmosphereShading's ground shader. Kept in step with the node's
+        // position by reapply_tile_placement() whenever the frame origin moves.
+        material->set_shader_parameter( "u_tile_center", toGodotVector( center_local ) );
 
         tile->base_uvs = uvs;
         tile->appearance_source = nullptr;
@@ -1402,6 +1478,9 @@ namespace tiles3d
         MeshInstance3D *mesh_instance = memnew( MeshInstance3D );
         mesh_instance->set_mesh( mesh );
         mesh_instance->set_material_override( material );
+        // The offset the vertices were authored against (see above). Re-derived from the ECEF
+        // centre - never accumulated - so it cannot drift after a series of origin shifts.
+        mesh_instance->set_position( toGodotVector( center_local ) );
         mesh_instance->set_name( String::utf8( "Tile_" ) + String::num_int64( tile->level ) + "_" +
                                  String::num_int64( tile->x ) + "_" + String::num_int64( tile->y ) );
         // INTERNAL_MODE_FRONT keeps the streamed tiles out of get_children(), the way

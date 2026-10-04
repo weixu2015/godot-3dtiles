@@ -138,6 +138,17 @@ namespace tiles3d
         /// Frees every tile resource and rebuilds the four roots. Also re-reads the URL.
         void reload_tiles();
 
+        /// Re-places every live tile after the shared frame's origin moved.
+        ///
+        /// The tile meshes are authored relative to their own centres (GlobeTile::
+        /// rtc_center_ecef), so an origin shift only changes where those centres land in the
+        /// layer's local space. That makes this one `set_position` per tile with a mesh - no
+        /// vertex rewrite, no GPU upload, no allocation - which is what keeps a small rebase
+        /// threshold affordable. The alternative (re-authoring the vertices) needs a new
+        /// ArrayMesh, ShaderMaterial and MeshInstance3D per tile, and measures in the tens of
+        /// milliseconds.
+        void rebase();
+
         // ---- stats (read-only, for the HUD and tests) ----
 
         int get_rendered_tile_count() const;
@@ -258,6 +269,9 @@ namespace tiles3d
         // ---- resources ----
 
         void create_tile_mesh( GlobeTile *tile );
+        /// Recursive helper for rebase(): re-derives the node placement of `tile` and its
+        /// descendants from their cached ECEF centres.
+        void reapply_tile_placement( GlobeTile *tile );
         void update_tile_appearance( GlobeTile *tile );
         GlobeTile *find_appearance_source( GlobeTile *tile );
         bool subtree_used_this_frame( const GlobeTile *tile ) const;

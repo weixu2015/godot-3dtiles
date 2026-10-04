@@ -356,4 +356,82 @@ namespace tiles3d::core
         return parts;
     }
 
+    std::string encodeUrlPath( const std::string &path )
+    {
+        constexpr char kHex[] = "0123456789ABCDEF";
+
+        auto isHexDigit = []( char c )
+        {
+            return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) || ( c >= 'A' && c <= 'F' );
+        };
+
+        auto isSafe = []( unsigned char c )
+        {
+            if ( ( c >= 'A' && c <= 'Z' ) || ( c >= 'a' && c <= 'z' ) || ( c >= '0' && c <= '9' ) )
+            {
+                return true;
+            }
+
+            switch ( c )
+            {
+                // Unreserved.
+                case '-':
+                case '.':
+                case '_':
+                case '~':
+                // Sub-delimiters that are legal in a path or a query.
+                case '!':
+                case '$':
+                case '&':
+                case '\'':
+                case '(':
+                case ')':
+                case '*':
+                case '+':
+                case ',':
+                case ';':
+                case '=':
+                // Separators that must stay literal: the path split and the query introducer.
+                case ':':
+                case '@':
+                case '/':
+                case '?':
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        std::string encoded;
+        encoded.reserve( path.size() + 8 );
+
+        for ( std::size_t i = 0; i < path.size(); ++i )
+        {
+            const unsigned char c = static_cast<unsigned char>( path[i] );
+
+            // Pass an existing escape through untouched rather than encoding the '%'. Encoding
+            // it would turn "%20" into "%2520" and the server would look for a file literally
+            // named "%20".
+            if ( c == '%' && i + 2 < path.size() && isHexDigit( path[i + 1] ) &&
+                 isHexDigit( path[i + 2] ) )
+            {
+                encoded.append( path, i, 3 );
+                i += 2;
+                continue;
+            }
+
+            if ( isSafe( c ) )
+            {
+                encoded.push_back( static_cast<char>( c ) );
+                continue;
+            }
+
+            encoded.push_back( '%' );
+            encoded.push_back( kHex[c >> 4] );
+            encoded.push_back( kHex[c & 0x0F] );
+        }
+
+        return encoded;
+    }
+
 } // namespace tiles3d::core

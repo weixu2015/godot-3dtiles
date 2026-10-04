@@ -69,7 +69,39 @@ namespace tiles3d
         /// through a Callable; also called automatically when the authority changes.
         void refresh();
 
+        // ---- origin shift (floating origin) ----
+
+        /// Moves the local frame's ORIGIN to `p_origin_ecef` **without rotating the frame**.
+        ///
+        /// This is the floating-origin primitive. The frame's basis stays the ENU basis of the
+        /// *declared* anchor; only the translation follows the camera, so moving the origin is
+        /// a pure translation of every local coordinate:
+        ///
+        ///     x_local_new = x_local_old - R^T (origin_new - origin_old)
+        ///
+        /// Why the rotation has to stay put: `eastNorthUpToFixedFrame()` derives a fresh ENU
+        /// basis at whatever point it is given, so re-deriving it per rebase would also rotate
+        /// the frame by the meridian convergence between the two points. Over a 1000 m rebase
+        /// that is 0.009 degrees - a visible sideways twitch of the whole scene - and it grows
+        /// linearly, so a 1000 km rebase would twist everything by about a degree. Freezing the
+        /// basis makes every rebase exactly translatory, which is what lets the camera be
+        /// compensated with the same vector and the picture not move at all.
+        ///
+        /// `refresh()` clears the rebase, so changing the origin authority (the demo's dataset
+        /// switch) still re-derives a proper ENU frame at the new anchor.
+        void rebase_origin_ecef( const godot::Vector3 &p_origin_ecef );
+
+        /// The frame's effective origin in ECEF metres: the rebased one while a rebase is in
+        /// effect, otherwise the declared anchor's position.
+        godot::Vector3 get_frame_origin_ecef() const;
+
+        /// True while the origin sits somewhere other than the declared anchor.
+        bool is_rebased() const;
+
     private:
+        /// Set by rebase_origin_ecef(); cleared by refresh().
+        mutable std::optional<math::Vec3> rebased_origin_;
+
         mutable std::optional<math::Mat4> cached_ecef_to_local;
     };
 

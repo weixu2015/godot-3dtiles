@@ -80,6 +80,19 @@ namespace tiles3d::core
     /// keeps the "does this URL have an authority" logic next to the rest of the URL rules.
     UrlParts splitUrl( const std::string &url );
 
+    /// Percent-encodes the characters that cannot appear raw in an HTTP request target.
+    ///
+    /// Deliberately separate from resolveUrl(): joining URLs must never re-encode them, so an
+    /// escape the author wrote survives. An HTTP request line is a narrower context - a raw
+    /// space terminates the target, and the server then sees a truncated path. This is not
+    /// hypothetical: the datasets here live under "3D Tiles/", and a request for
+    /// "/3D Tiles/weinan/tileset.json" reaches the server as "/3D" and comes back 404.
+    ///
+    /// Only what is actually illegal is touched. Unreserved characters and the path/query
+    /// sub-delimiters pass through, so "/a/b?c=d&e=f" is unchanged, and a well-formed %XX
+    /// escape is copied verbatim so an already-encoded URL is not double-encoded into %25.
+    std::string encodeUrlPath( const std::string &path );
+
 } // namespace tiles3d::core
 
 #endif // TILES3D_CORE_IO_URL_H

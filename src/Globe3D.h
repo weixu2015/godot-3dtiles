@@ -186,6 +186,22 @@ namespace tiles3d
         /// graticule toggle change; exposed for scripted use.
         void rebuild();
 
+        /// Re-places everything this node draws after the shared frame's *origin* moved - the
+        /// floating-origin primitive (see GlobeCameraController::shift_origin_now).
+        ///
+        /// The two meshes split the work differently and this honours that split. The surface
+        /// and the graticule are baked straight into local coordinates, vertex by vertex, so a
+        /// moved origin means a new mesh and there is no node transform to nudge; the
+        /// atmosphere shell is authored in **Y-up ECEF** and placed by its own node transform,
+        /// so only that transform changes and its 12k vertices are untouched.
+        ///
+        /// Rebuilding is the honest price of authoring in local space - and authoring in local
+        /// space is the whole point, because it is what keeps the vertices next to the camera
+        /// small. The alternative (emitting ECEF and letting a node transform place the mesh)
+        /// trades the rebuild for a constant ~6371 km vertex magnitude, which is the 0.38 m
+        /// quantisation the rebase exists to avoid.
+        void rebase();
+
         /// Resolves show_surface_ against the current tile state and applies it. Called
         /// every frame, because whether a tile layer is rendering can change at any time.
         void update_surface_visibility();

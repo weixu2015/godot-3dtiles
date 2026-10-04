@@ -8,6 +8,8 @@
 #include "godot_cpp/classes/global_constants.hpp"
 #include "godot_cpp/core/class_db.hpp"
 
+#include <cmath>
+
 namespace tiles3d
 {
     using godot::Callable;
@@ -57,6 +59,12 @@ namespace tiles3d
 
         // Bound so the origin resources can reach it through a Callable.
         ClassDB::bind_method( D_METHOD( "refresh" ), &Georeference3D::refresh );
+
+        ClassDB::bind_method( D_METHOD( "rebase_origin_ecef", "p_origin_ecef" ),
+                              &Georeference3D::rebase_origin_ecef );
+        ClassDB::bind_method( D_METHOD( "get_frame_origin_ecef" ),
+                              &Georeference3D::get_frame_origin_ecef );
+        ClassDB::bind_method( D_METHOD( "is_rebased" ), &Georeference3D::is_rebased );
 
         ADD_SIGNAL( godot::MethodInfo( "georeference_changed" ) );
     }
@@ -153,13 +161,22 @@ namespace tiles3d
 
             // `scale` multiplies positions expressed in the local frame, so it scales the
             // three axes. 1.0 (the default) leaves the frame rigid, which is the only value
-            // exercised so far.
+            // exercised so far. The basis columns only - the translation is set below.
             if ( scale != 1.0 )
             {
                 for ( int axis = 0; axis < 3; ++axis )
                 {
                     frame[axis] *= scale;
                 }
+            }
+
+            // A rebase moves the origin and nothing else: the basis is still the declared
+            // anchor's ENU, and only the translation column follows. See the header for why
+            // re-deriving the basis per rebase would rotate the whole world.
+            if ( rebased_origin_.has_value() )
+            {
+                frame[3] = math::Vec4( rebased_origin_->x, rebased_origin_->y,
+                                       rebased_origin_->z, 1.0 );
             }
 
             cached_local_to_ecef = frame;
@@ -178,9 +195,44 @@ namespace tiles3d
 
     void Georeference3D::refresh()
     {
+        // A refresh means "re-derive from the authority", which is what the dataset switch
+        // needs: it moves the anchor *and* re-orients the ENU frame at the new point. A rebase
+        // is the other half of the story and is deliberately undone here.
+        rebased_origin_.reset();
         cached_local_to_ecef.reset();
         cached_ecef_to_local.reset();
         emit_signal( "georeference_changed" );
+    }
+
+    void Georeference3D::rebase_origin_ecef( const godot::Vector3 &p_origin_ecef )
+    {
+        const math::Vec3 origin( p_origin_ecef.x, p_origin_ecef.y, p_origin_ecef.z );
+
+        // A degenerate origin would make every local coordinate infinite or NaN, and the
+        // symptom (an all-black scene that still reports "loaded") is expensive to trace, so
+        // refuse it here rather than downstream.
+        if ( !std::isfinite( origin.x ) || !std::isfinite( origin.y ) ||
+             !std::isfinite( origin.z ) || glm::length( origin ) < 1.0 )
+        {
+            return;
+        }
+
+        rebased_origin_ = origin;
+        cached_local_to_ecef.reset();
+        cached_ecef_to_local.reset();
+        emit_signal( "georeference_changed" );
+    }
+
+    godot::Vector3 Georeference3D::get_frame_origin_ecef() const
+    {
+        const math::Vec3 origin =
+            rebased_origin_.has_value() ? *rebased_origin_ : origin_ecef();
+        return godot::Vector3( origin.x, origin.y, origin.z );
+    }
+
+    bool Georeference3D::is_rebased() const
+    {
+        return rebased_origin_.has_value();
     }
 
 } // namespace tiles3d

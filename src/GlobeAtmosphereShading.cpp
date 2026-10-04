@@ -567,6 +567,15 @@ vec3 srgb_to_linear_approx(vec3 c) {
                     "uniform vec3 u_base_color = vec3(1.0);\n"
                     "uniform vec2 u_uv_scale = vec2(1.0);\n"
                     "uniform vec2 u_uv_offset = vec2(0.0);\n"
+                    // Tile vertices are authored RELATIVE TO THE TILE'S OWN CENTRE (RTC, see
+                    // GlobeTile::rtc_center_ecef) and the MeshInstance3D carries that offset as
+                    // its position. Godot's VERTEX is model space, i.e. it does NOT contain the
+                    // node's translation, so the centre has to be added back here before the
+                    // frame matrix can turn the point into ECEF. Without it every tile is shaded
+                    // as though it sat on the frame's origin: a per-tile error equal to its own
+                    // offset, which is what a checkerboard of mismatched day/night and ground
+                    // scattering looks like on screen.
+                    "uniform vec3 u_tile_center = vec3(0.0);\n"
                     "\n" +
                     String( kGlslAtmoCommon ) +
                     "\n"
@@ -579,7 +588,13 @@ vec3 srgb_to_linear_approx(vec3 c) {
                     // anchored on the georeference) but the integral measures from the Earth's
                     // centre. Without this the two are ~6371 km apart and every length() in the
                     // raymarch is wrong by that much.
-                    "    vec3 ecef = (globe_atmo_local_to_ecef_y_up * vec4(VERTEX, 1.0)).xyz;\n"
+                    //
+                    // VERTEX alone is NOT that local space any more: the vertices are relative
+                    // to the tile centre (so an origin shift costs one transform write instead of
+                    // a re-authoring) and the centre rides on the node. Add it back - see
+                    // u_tile_center above.
+                    "    vec3 local_position = VERTEX + u_tile_center;\n"
+                    "    vec3 ecef = (globe_atmo_local_to_ecef_y_up * vec4(local_position, 1.0)).xyz;\n"
                     "    v_ecef_position = ecef;\n"
                     // Geometric normal, i.e. the true ellipsoid normal rather than the vertex
                     // direction. The tiles' own normals come from the mesh and are unreliable at
