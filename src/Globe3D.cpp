@@ -1351,7 +1351,19 @@ namespace tiles3d
         // its position is defined relative to the camera. set_global_transform() handles the
         // conversion, and the basis is taken from the camera so the quad always faces it - the
         // QuadMesh normal is +Z, so any other basis shows the sprite edge-on as a thin line.
-        const Vector3 direction = get_sun_direction();
+        // The sun direction the atmosphere shader integrates its terminator from is the raw
+        // Y-up ECEF vector, and the shell's vertices are authored in that same space - which
+        // is why the lit limb is where it should be. The frame's *local* direction is a
+        // different space (the ENU tangent frame); feeding it to a global-space placement is
+        // what pointed the sprite away from the lit limb - the DirectionalLight3D in globe.gd
+        // converts through to_global() and was never wrong, and the camera controller goes
+        // through frame_direction_to_parent() for the same reason. Carry the shader's vector
+        // through the shell's global basis instead, so the sprite, the light and the
+        // terminator all live in one coordinate system.
+        const godot::Basis &globe_basis = atmosphere_ != nullptr
+                                              ? atmosphere_->get_global_transform().basis
+                                              : get_global_transform().basis;
+        const Vector3 direction = globe_basis.xform( compute_sun_direction_y_up() );
         const Vector3 camera_global = camera->get_global_position();
         double pin_distance = kSunSpriteDistance;
         if ( const Camera3D *camera3d = godot::Object::cast_to<Camera3D>( camera ) )
