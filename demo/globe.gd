@@ -4,18 +4,20 @@ extends Node3D
 #
 # Open demo/globe.tscn in the Godot editor: the Earth is already framed with its atmosphere,
 # and pressing F5 lets you orbit it with the mouse.
-#   left drag  - orbit around the Earth
+#   left drag  - orbit about the point under the cursor
 #   right drag - tilt
 #   wheel      - zoom, with inertia
 #
 # The scene renders correctly on its own; this script only adds convenience shortcuts so a
 # recording can move between viewpoints without touching the mouse.
 #
-# The HUD picker swaps the loaded 3D Tiles dataset and flies to it. Swapping a dataset is not
-# just a URL change: the georeference anchor has to follow the dataset (see
-# _sync_anchor_to_dataset), otherwise the content sits on the far side of the planet from the
-# anchor and lands in a float32 range whose quantisation is a metre - which is what a jitter
-# looks like when it is measured rather than eyeballed.
+# The HUD picker swaps the loaded 3D Tiles dataset and flies to it; the startup dataset (the
+# first picker entry) is framed the same way once it becomes readable, so the run opens on the
+# tiles rather than on the whole globe. Swapping a dataset is not just a URL change: the
+# georeference anchor has to follow the dataset (see _rebase_to_dataset), otherwise the content
+# sits on the far side of the planet from the anchor and lands in a float32 range whose
+# quantisation is a metre - which is what a jitter looks like when it is measured rather than
+# eyeballed.
 
 @export var start_longitude_degrees: float = 105.0
 @export var start_latitude_degrees: float = 25.0
@@ -29,13 +31,86 @@ const EARTH_SEMI_MAJOR_AXIS := 6378137.0
 # Datasets the picker offers. Each entry is a label plus a tileset.json URL; nothing else has
 # to be kept in sync, because the position and the required anchor are both read back out of
 # the tileset itself once it loads.
+#
+# Every root document under E:/GISData/3D Tiles, one entry per dataset - the per-tile
+# tileset.json files (weinan/Data/Tile_+000_+000/..., taiwan/Data/...) are children of these and
+# are reached by the loader, not selected here.
+#
+# The FIRST entry is the startup dataset, and it has to stay the one demo/globe.tscn's Tileset3D
+# already points at: the scene's Georeference3D anchor is authored at that dataset's position, so
+# starting anywhere else would spend the first seconds with the content on the far side of the
+# planet. Switching to any other entry re-anchors the origin (see _rebase_to_dataset).
 const DATASETS := [
 	{
 		"label": "Photogrammetry 1.1 (disk)",
 		"url": "E:/GISData/3D Tiles/1.1/Photogrammetry/tileset.json",
 	},
 	{
-		"label": "weinan (localhost:9090)",
+		"label": "Photogrammetry 1.0 (disk)",
+		"url": "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json",
+	},
+	{
+		"label": "weinan",
+		"url": "E:/GISData/3D Tiles/weinan/tileset.json",
+	},
+	{
+		"label": "taiwan",
+		"url": "E:/GISData/3D Tiles/taiwan/tileset.json",
+	},
+	{
+		"label": "test",
+		"url": "E:/GISData/3D Tiles/test/tileset.json",
+	},
+	{
+		"label": "Icospheres",
+		"url": "E:/GISData/3D Tiles/Icospheres/tileset.json",
+	},
+	{
+		"label": "texturessphere",
+		"url": "E:/GISData/3D Tiles/texturessphere/tileset.json",
+	},
+	{
+		"label": "Aerometrex SanFrancisco 2cm (known corrupt: deep tree missing)",
+		"url": "E:/GISData/3D Tiles/Aerometrex-SanFrancisco-2cm/tileset.json",
+	},
+	{
+		"label": "samples 1.0 DiscreteLOD",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithDiscreteLOD/tileset.json",
+	},
+	{
+		"label": "samples 1.0 RequestVolume",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithRequestVolume/tileset.json",
+	},
+	{
+		"label": "samples 1.0 TreeBillboards",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithTreeBillboards/tileset.json",
+	},
+	{
+		"label": "samples 1.1 MetadataGranularities",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/MetadataGranularities/tileset.json",
+	},
+	{
+		"label": "samples 1.1 MultipleContents",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/MultipleContents/tileset.json",
+	},
+	{
+		"label": "samples 1.1 SparseImplicitOctree",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/SparseImplicitOctree/tileset.json",
+	},
+	{
+		"label": "samples 1.1 SparseImplicitQuadtree",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/SparseImplicitQuadtree/tileset.json",
+	},
+	{
+		"label": "samples 1.1 TilesetWithFullMetadata",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/TilesetWithFullMetadata/tileset.json",
+	},
+	{
+		"label": "samples glTF GpuInstancesMetadata",
+		"url": "E:/GISData/3D Tiles/3d-tiles-samples/glTF/GpuInstancesMetadata/tileset.json",
+	},
+	{
+		"label": "weinan (http smoke test, localhost:9090)",
 		"url": "http://localhost:9090/3D Tiles/weinan/tileset.json",
 	},
 ]
@@ -48,6 +123,10 @@ var _was_flying := false
 # Set between "the picker asked for a dataset" and "that dataset finished loading": the load
 # handler has to know whether to fly, or whether it is just a first load reporting in.
 var _pending_flight := false
+# True until the startup dataset has been flown to. The opening pose is the whole-globe framing
+# below; the first successful load replaces it with the tile view, so the demo opens on the
+# dataset rather than on a blue marble with a speck on it.
+var _initial_view_pending := true
 # Seconds a switch is allowed to take before it is declared dead. Without a deadline a URL
 # that never answers leaves the picker wedged - no flight, no error, and the *next* load
 # would fire the stale one.
@@ -159,6 +238,32 @@ func _anchor_authority() -> Resource:
 		return null
 	return authority
 
+# Is the dataset's declared position somewhere a camera can actually go?
+#
+# A tileset authored without any georeference reports whatever its root transform happens to be,
+# and the answer can be nonsense: Icospheres declares a 2 m sphere at lon 0, lat 90,
+# height -6356752 m - the centre of the Earth. Flying there is meaningless, and re-anchoring the
+# ENU frame to lat 90 makes every coordinate in the scene degenerate (east and north are both
+# undefined at a pole), which stalled a frame for twenty seconds. A dataset like that still loads
+# and still gets listed; it just gets reported instead of flown to.
+func _dataset_position_problem() -> String:
+	if _tileset == null:
+		return "no tileset"
+	var radius: float = _tileset.get_dataset_radius()
+	if radius <= 0.0:
+		return "still loading"
+	var lon: float = _tileset.get_dataset_longitude()
+	var lat: float = _tileset.get_dataset_latitude()
+	var height: float = _tileset.get_dataset_height()
+	if absf(lat) > 89.5:
+		return "declares itself at lat %.1f, where there is no east/north frame" % lat
+	var centre_distance := _distance_to_dataset(lon, lat, height)
+	if centre_distance < 6300000.0:
+		return "declares itself %.0f km inside the Earth" % ((6356752.0 - centre_distance) / 1000.0)
+	if centre_distance > 1.0e8:
+		return "declares itself %.0f km from the Earth's centre" % (centre_distance / 1000.0)
+	return ""
+
 # Moves the ENU origin onto the dataset.
 #
 # This is the single lever that decides how much of the float32 budget the dataset gets. With
@@ -181,15 +286,27 @@ func _rebase_to_dataset() -> void:
 	if authority == null or _tileset == null:
 		return
 
+	# Nothing to gain from moving the origin onto a position that cannot be visited - and moving
+	# it would still teleport the planet (see _dataset_position_problem).
+	if _dataset_position_problem() != "":
+		return
+
 	var lon: float = _tileset.get_dataset_longitude()
 	var lat: float = _tileset.get_dataset_latitude()
 	if is_equal_approx(float(authority.get("longitude")), lon) \
 			and is_equal_approx(float(authority.get("latitude")), lat):
 		return
 
-	authority.set("longitude", lon)
-	authority.set("latitude", lat)
-	authority.set("height", 0.0)
+	# The anchor move is done by the camera, not here, because it has to be compensated: every
+	# content node is placed through the frame, so moving the anchor translates AND rotates the
+	# whole planet (up to 1e7 m and 180 degrees between continents) while the camera - a sibling
+	# of the frame - stays put. That is the "switch jumps instead of flying" complaint: the
+	# planet teleported, and the flight that followed it was the only smooth part.
+	# reanchor_preserving_view() re-expresses the camera through the new frame, so the move is
+	# invisible and the flight is all that is left to see.
+	# Degenerate anchors are refused there too, which is what keeps a dataset that declares
+	# itself at lat 90 (Icospheres) from re-orienting every ENU coordinate in the scene.
+	_camera.call("reanchor_preserving_view", lon, lat)
 
 	# The globe's meshes are authored in Y-up ECEF and placed by a node transform, so a moved
 	# origin costs it one rebase() (three transform writes - the frame landing moved, the
@@ -231,35 +348,47 @@ func home() -> void:
 	if radius <= 0.0:
 		# The load signal can arrive while the tree is still half-built: reload() tears the
 		# previous dataset down and the first frames after that run against a root whose
-		# bounding volume is not readable yet. Falling back to the opening viewpoint here is
-		# what made the picker "often" fail - one run in a handful flew to the overview
-		# instead of the dataset (measured: |p| = 1.63e7, exactly the opening orbit). Retry for
-		# a bounded number of frames instead, and only fall back once that is exhausted.
+		# bounding volume is not readable yet. Retry for a bounded number of frames instead -
+		# and do NOT snap to the opening viewpoint in the meantime. That fallback is what made
+		# the picker "often" fail: the snap was indistinguishable from a flight to the wrong
+		# place, because from a distance a whole-globe framing and a missed flight look the same.
+		# If the dataset never becomes readable the status line below says so, which is a
+		# truthful failure instead of a plausible-looking one.
 		if _home_retry > 0:
 			_home_retry -= 1
-			_status.text = "waiting for the dataset to become readable ..."
 		else:
 			_home_retry = HOME_RETRY_FRAMES
-			_status.text = "Tileset3D has not loaded yet"
-			_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
+			_status.text = "Tileset3D has not loaded yet - will frame it as soon as it is readable"
 		return
 	_home_retry = 0
+
+	# A dataset can be perfectly loadable and still be somewhere no camera belongs - see
+	# _dataset_position_problem. Say so instead of flying there: the alternative is a flight into
+	# the Earth's interior, or a scene-wide degenerate frame.
+	var problem := _dataset_position_problem()
+	if problem != "":
+		_status.text = "not flying: %s" % problem
+		return
 
 	var lat: float = _tileset.get_dataset_latitude()
 	var lon: float = _tileset.get_dataset_longitude()
 	var height: float = _tileset.get_dataset_height()
 
-	# orbit_to/fly_to take the distance from the ellipsoid *centre*, and four dataset radii is
-	# a comfortable framing; the floor keeps a tiny dataset from putting the camera inside it.
+	# Framing distance: put the dataset's bounding sphere at about 70% of the viewport's vertical
+	# half-angle (the /1.4), so the tiles fill the screen instead of sitting in the middle of an
+	# ocean. The old `radius * 4` was over 2x too far for a sub-kilometre dataset (a 488 m dataset
+	# framed at 2.3 km), which is most of "it does not fly near the tile".
 	#
 	# The distance is measured to the dataset itself rather than approximated as
 	# "semi-major axis + height": the ellipsoid is 8 km closer to its centre at latitude 40
 	# than at the equator, and using the equatorial radius parks the camera 8 km above the
 	# dataset - it flies to the right place and the model is a speck.
-	var distance := _distance_to_dataset(lon, lat, height) + maxf(radius * 4.0, 400.0)
-	_camera.call("fly_to", lon, lat, distance, home_flight_seconds)
+	var surface_distance := _distance_to_dataset(lon, lat, height)
+	var half_fov := deg_to_rad(_camera.fov * 0.5)
+	var framing := clampf(radius / maxf(tan(half_fov), 0.05) / 1.4, 300.0, radius * 6.0)
+	_camera.call("fly_to", lon, lat, surface_distance + framing, home_flight_seconds)
 	_aim_sun()
-	_update_status("flying to %.5f, %.5f (%.0f m radius)" % [lon, lat, radius])
+	_update_status("flying to %.5f, %.5f (radius %.0f m, %.0f m above)" % [lon, lat, radius, framing])
 
 # Distance from the centre of the ellipsoid to a geodetic position, measured through the
 # globe, which is the only node that knows the frame the scene is using. Falls back to the
@@ -322,6 +451,24 @@ func _update_status(prefix: String = "") -> void:
 
 func _process(_delta: float) -> void:
 	if _camera == null:
+		return
+
+	# First load of the session: the scene opens framed on the whole globe and this replaces that
+	# with the tile view, so the run starts on the data rather than on a blue marble.
+	#
+	# Polled rather than driven by tileset_loaded: a local tileset with no external references
+	# loads inside the Tileset3D node's own _ready, which Godot runs BEFORE this node's - the
+	# signal is already gone by the time _ready gets here to connect to it, and the startup
+	# flight simply never happened. Watching for the dataset to become readable covers both
+	# orders, and it is the same condition the retry below needs anyway.
+	if _initial_view_pending and not _pending_flight and _tileset != null \
+			and _tileset.get_dataset_radius() > 0.0:
+		_initial_view_pending = false
+		_status.text = "framing the startup dataset ..."
+		await _rebase_to_dataset()
+		# A pick during the rebase owns the camera now; its own load handler will fly.
+		if not _pending_flight:
+			home()
 		return
 
 	# A switch with no answer must expire rather than sit there.
