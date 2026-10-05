@@ -40,9 +40,20 @@ project( godot-3dtiles
 # Install prefix defaults to the repository root, so `cmake --install` drops the built
 # library plus the generated .gdextension file into demo/addons, which is where the demo
 # project loads the extension from. This stays inside the project tree (no system path,
-# no administrator rights). Override with -DCMAKE_INSTALL_PREFIX=... to install
-# somewhere else (INSTALL_DIR below follows the prefix).
-if ( CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT )
+# no administrator rights). Install elsewhere with -DGODOT3DTILES_INSTALL_PREFIX=...
+# (INSTALL_DIR below follows the prefix; passing -DCMAKE_INSTALL_PREFIX directly does not
+# work, because the fallback below always restores the repository root).
+# The guard has to be a fallback, not a one-shot: CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT
+# stops being true once a cache entry exists, so a prefix that landed in the cache by accident
+# (CMake's own C:/Program Files (x86)/<project> default, seen here) could never be corrected -
+# INSTALL_DIR then pointed outside the repo and `cmake --install` wrote the DLL there instead
+# of demo/addons. Anything that is not inside the repository falls back to the root; an override
+# is opt-in through GODOT3DTILES_INSTALL_PREFIX, which is why it survives reconfigures.
+if ( DEFINED GODOT3DTILES_INSTALL_PREFIX )
+    set( CMAKE_INSTALL_PREFIX "${GODOT3DTILES_INSTALL_PREFIX}" CACHE PATH "Install prefix" FORCE )
+elseif ( CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT
+        OR NOT ( CMAKE_INSTALL_PREFIX STREQUAL "${CMAKE_SOURCE_DIR}"
+                 OR CMAKE_INSTALL_PREFIX MATCHES "^${CMAKE_SOURCE_DIR}/" ) )
     set( CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}" CACHE PATH "Install prefix" FORCE )
 endif()
 
