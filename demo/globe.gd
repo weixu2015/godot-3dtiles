@@ -185,6 +185,18 @@ func _ready() -> void:
 		_tileset.tileset_loaded.connect(_on_tileset_loaded)
 		_tileset.load_failed.connect(_on_load_failed)
 
+	# GLOBE_DATASET=<substring>: open straight into a dataset instead of whatever url the scene
+	# was saved with. Two reasons this earns its keep: the scene's url is set in the editor and
+	# a run that has to be driven through the picker cannot be reproduced from a script, and a
+	# dataset switch is the slowest, most failure-prone path in the demo - so it is the one that
+	# needs a launch flag. Matches the label or the url, first hit wins.
+	var wanted := OS.get_environment("GLOBE_DATASET")
+	if wanted != "" and _picker != null:
+		for i in DATASETS.size():
+			if String(DATASETS[i]["label"]).contains(wanted) or String(DATASETS[i]["url"]).contains(wanted):
+				_on_dataset_selected(i)
+				break
+
 	# A recognisable opening view (default: over China), framed so the whole globe and its
 	# atmosphere fit comfortably.
 	_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
@@ -333,7 +345,7 @@ func _rebase_to_dataset() -> void:
 	# invisible and the flight is all that is left to see.
 	# Degenerate anchors are refused there too, which is what keeps a dataset that declares
 	# itself at lat 90 (Icospheres) from re-orienting every ENU coordinate in the scene.
-	_camera.call("reanchor_preserving_view", lon, lat)
+	var ok = _camera.call("reanchor_preserving_view", lon, lat)
 
 	# The globe's meshes are authored in Y-up ECEF and placed by a node transform, so a moved
 	# origin costs it one rebase() (three transform writes - the frame landing moved, the
@@ -388,13 +400,26 @@ func _apply_height_offset() -> void:
 	var globe := get_node_or_null("Georeference3D/Globe3D")
 	if carrier == null or globe == null:
 		return
-	# The surface normal at the ENU origin, expressed in the Tileset3D node's parent space
-	# (the frame carrier): the direction from the ellipsoid centre to the origin. The origin
-	# IS the carrier's local zero, so up = -centre, with the centre read through Globe3D
-	# (which owns the ECEF conversion) and re-expressed in carrier space.
-	var centre_global: Vector3 = globe.to_global(globe.call("ecef_to_local", Vector3.ZERO))
-	var centre_carrier: Vector3 = carrier.to_local(centre_global)
-	var up: Vector3 = -(centre_carrier as Vector3).normalized()
+	var authority := _anchor_authority()
+	if authority == null:
+		return
+	# The surface normal at the ENU origin, in the carrier's local space - which is the space
+	# the offset must be written in, because the tileset node is a child of the carrier.
+	#
+	# Taken as the difference between two nearby geodetic points, NOT from the Earth's centre.
+	# The centre looks like the obvious source and is wrong: `ecef_to_local(Vector3.ZERO)` comes
+	# back as (10034974, -10633125, -364263.6) - 1.46e7 m out, where a surface anchor is 6.37e6 m
+	# from the centre - and normalised that is a HORIZONTAL direction. The 31.5 m lift therefore
+	# went entirely sideways, the model never rose, and it sank exactly as it did before the
+	# offset existed; the offset was being applied correctly to the wrong axis all along.
+	#
+	# A difference cancels whatever constant offset the frame conversion carries (both ends are
+	# shifted equally) and lands on (0, 0, 1), which is what an ENU frame requires. Measured:
+	# 1 m of height maps to exactly 1.0000 m, so the frame has no scale to worry about either.
+	var anchor_lon: float = float(authority.get("longitude"))
+	var anchor_lat: float = float(authority.get("latitude"))
+	var base: Vector3 = globe.call("geodetic_to_local", anchor_lon, anchor_lat, 0.0)
+	var up: Vector3 = (globe.call("geodetic_to_local", anchor_lon, anchor_lat, 1.0) - base).normalized()
 	node.transform = Transform3D(Basis(), up * offset)
 
 func _entry_for_url(url: String) -> Dictionary:
@@ -653,7 +678,6 @@ func _toggle_skybox() -> void:
 	_skybox_on = not _skybox_on
 	environment.background_mode = Environment.BG_SKY if _skybox_on else Environment.BG_COLOR
 	_update_status()
-
 
 func _toggle(node_path: String, property: String) -> void:
 	var node := get_node_or_null(node_path)

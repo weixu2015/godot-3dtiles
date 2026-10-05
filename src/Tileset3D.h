@@ -166,6 +166,13 @@ namespace tiles3d
         /// the node. Cached with the radius because the region conversion has already run by
         /// the time either can be measured.
         math::Vec3 dataset_center_ = math::Vec3( 0.0 );
+        /// The same centre in the tileset's OWN space, before any frame is applied, plus the
+        /// branch that decides how it reaches the render frame. Cached because the frame is not
+        /// fixed: the demo re-anchors the Georeference3D onto a dataset when it loads, which
+        /// re-expresses every node-local coordinate in the scene - so a node-local centre goes
+        /// stale the instant the anchor moves, while this one does not.
+        math::Vec3 dataset_center_raw_ = math::Vec3( 0.0 );
+        bool dataset_root_is_region_ = false;
         // Filled by report_georeference() from the root transform; see the getters above.
         double dataset_longitude_ = 0.0;
         double dataset_latitude_ = 0.0;
@@ -508,6 +515,8 @@ namespace tiles3d
         double get_dataset_radius() const;
         /// Dataset centre in this node's local space, for scripts that orbit around it.
         godot::Vector3 get_dataset_center_local() const;
+        /// The dataset centre through the frame as it is NOW; see the note on dataset_center_raw_.
+        math::Vec3 current_dataset_center_local() const;
         /// Distance from the Georeference3D anchor to the dataset centre, metres. -1 when
         /// there is no Georeference3D.
         double get_anchor_separation() const;

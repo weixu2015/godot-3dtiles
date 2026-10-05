@@ -1332,6 +1332,8 @@ namespace tiles3d
         last_rendered_count = 0;
         dataset_radius = 0.0;
         dataset_center_ = math::Vec3( 0.0 );
+        dataset_center_raw_ = math::Vec3( 0.0 );
+        dataset_root_is_region_ = false;
         dataset_corners_valid_ = false;
         loaded_bytes = 0;
         needs_framing = false;
@@ -1467,10 +1469,9 @@ namespace tiles3d
         // from the render frame and applies the root's own transform under it, so that is the
         // composition the tiles really land in - which is NOT this node's origin whenever the
         // implicit frame leaves the content in the tileset's own coordinates.
-        dataset_center_ =
-            root_is_region ? math::transformPoint( model, root_center_raw )
-                           : math::transformPoint( math::multiply( model, root->transform ),
-                                                    root_center_raw );
+        dataset_center_raw_ = root_center_raw;
+        dataset_root_is_region_ = root_is_region;
+        dataset_center_ = current_dataset_center_local();
 
         // The same composition for the eight corners, which is what the editor framing
         // actually fits: a sphere of the root's radius is not a bound on a box, because a
@@ -2084,14 +2085,48 @@ namespace tiles3d
         return dataset_radius;
     }
 
+    math::Vec3 Tileset3D::current_dataset_center_local() const
+    {
+        // Re-derived through the CURRENT frame, which is what makes it survive a re-anchor. The
+        // frame's local zero is the anchor, so a node-local coordinate is only meaningful
+        // relative to the anchor that was in place when it was written.
+        if ( root == nullptr || !root->boundingVolume.has_value() )
+        {
+            return dataset_center_;
+        }
+        const math::Mat4 model = compute_model_matrix();
+        return dataset_root_is_region_
+                   ? math::transformPoint( model, dataset_center_raw_ )
+                   : math::transformPoint( math::multiply( model, root->transform ),
+                                           dataset_center_raw_ );
+    }
+
     godot::Vector3 Tileset3D::get_dataset_center_local() const
     {
-        return toGodotVector( dataset_center_ );
+        return toGodotVector( current_dataset_center_local() );
     }
 
     double Tileset3D::get_anchor_separation() const
     {
-        return anchor_separation_;
+        // Computed live rather than reported from the load-time snapshot taken in
+        // report_georeference(). The anchor MOVES: switching a dataset re-anchors the frame onto
+        // it (GlobeCameraController::reanchor_preserving_view), and a snapshot from before that
+        // keeps saying the dataset is four thousand kilometres from where it actually is. The
+        // demo's status panel prints this number with a warning beside it, so the stale value
+        // reads as "the placement is broken" for a dataset that is placed perfectly - it is a
+        // warning about a problem that was fixed the moment the anchor moved.
+        //
+        // The Georeference3D node sits at the world origin and the frame's local zero IS the
+        // anchor, so the separation is simply the distance from the world origin to the dataset
+        // centre in world space.
+        const Georeference3D *reference = find_georeference();
+        if ( reference == nullptr || dataset_radius <= 0.0 )
+        {
+            return -1.0;
+        }
+        const godot::Vector3 centre_world =
+            get_global_transform().xform( toGodotVector( current_dataset_center_local() ) );
+        return static_cast<double>( centre_world.length() );
     }
 
     String Tileset3D::get_last_error() const
