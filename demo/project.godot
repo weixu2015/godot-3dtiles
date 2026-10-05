@@ -31,13 +31,5 @@ enabled=PackedStringArray("res://addons/viewport_hud/plugin.cfg")
 
 [rendering]
 
-; Pin the renderer so running from the editor (F5) matches every probe and screenshot
-; taken with `--rendering-driver opengl3`. The ground-atmosphere pass is authored in
-; display space and encodes explicitly on the way out (see GlobeAtmosphereShading) -
-; correct when ALBEDO hits the framebuffer directly under Compatibility, but under
-; Forward+ that already-encoded value goes through the linear HDR buffer, tonemap and
-; sRGB encode once more, which double-encodes: the globe reads brighter and whiter than
-; the reference. If Forward+ support is ever wanted, that shader needs a renderer branch
-; instead of a project toggle.
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
