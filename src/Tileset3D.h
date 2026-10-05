@@ -31,6 +31,7 @@
 #include "godot_cpp/variant/vector3.hpp"
 
 #include <array>
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <vector>
@@ -60,10 +61,20 @@ namespace tiles3d
 
         /// Cap on requests in flight at once - fetching AND decoding combined.
         ///
-        /// With the loader running on worker threads this is a throughput knob rather than a
-        /// stall guard: the work no longer happens on the main thread, so raising it costs
-        /// memory and bandwidth instead of frame time. The reference scheduler uses 20.
-        int maximum_simultaneous_loads = 20;
+        /// With the loader running on worker threads this was written off as a throughput knob
+        /// rather than a stall guard, on the grounds that the work no longer happens on the main
+        /// thread. Measured, that is only half true: every in-flight request is a worker
+        /// competing for the same cores as the main thread, so under a moving camera - exactly
+        /// when the frame budget is tightest - the frame time tracks this number closely.
+        ///
+        /// A/B on Aerometrex SanFrancisco 2cm over localhost, frame time while streaming:
+        ///   20 -> 13.9 / 18.2 / 16.7 ms      8 -> 10.4 / 16.5 ms
+        ///    6 -> 10.0 / 13.3 ms             4 ->  8.7 / 11.2 / 12.2 ms
+        /// while tiles-per-second stayed in the same band (the source is local, so bandwidth is
+        /// not what limits it). The reference scheduler's 20 is kept reachable - raise it for a
+        /// high-latency source where fewer requests would idle the link - but it is not a good
+        /// default for interactive use.
+        int maximum_simultaneous_loads = 6;
 
         /// How many decoded tiles may be turned into Godot resources and attached per frame.
         ///
@@ -114,6 +125,27 @@ namespace tiles3d
 
         /// One-shot latch for framing_released(), reset on every load.
         bool framing_released_emitted_ = false;
+
+        /// TILES3D_TIMING=1 in the environment: print a per-second breakdown of where update_tiles
+        /// spends its time. Off by default; the frame time alone says something is expensive, not
+        /// what, and every optimisation here has to be measured against a stage cost.
+        bool timing_enabled_ = false;
+        double last_traverse_ms_ = 0.0;
+        double last_adopt_ms_ = 0.0;
+        double last_visibility_ms_ = 0.0;
+        double last_rebase_ms_ = 0.0;
+        double last_timing_report_ms_ = -1.0e30;
+        uint64_t traverse_geo_us_ = 0;      ///< microseconds in the geometry block of the traversal
+        uint64_t traverse_total_us_ = 0;    ///< ...and in the whole call
+        int traverse_calls_ = 0;
+        int traverse_geo_samples_ = 0;
+        double last_model_ms_ = 0.0;        ///< compute_model_matrix() alone, per frame
+
+
+        /// The tiles shown by the last sync_content_visibility(). Kept so the next one can hide
+        /// only what left the render set instead of re-hiding every loaded tile - the loaded
+        /// list runs to thousands while the render set is a hundred or so.
+        std::vector<core::Tile *> visible_tiles_;
 
         /// The dataset's own up, as a direction in this node's local space, used only to
         /// orient the editor's opening view. (0, 0, 0) means "work it out": the geodetic up
@@ -297,8 +329,11 @@ namespace tiles3d
         ViewState current_view() const;
 
         void update_tiles();
+        /// Timing wrapper around traverse_tile_inner(); see its definition.
         void traverse_tile( core::Tile &tile, const math::Mat4 &parent_world, const ViewState &view,
                             double nearest_conditional_ge );
+        void traverse_tile_inner( core::Tile &tile, const math::Mat4 &parent_world,
+                                  const ViewState &view, double nearest_conditional_ge );
         void request_content( core::Tile &tile, const LoadPriority &priority );
 
         /// Sorts the frame's requests by priority and hands what fits to the loader.
@@ -312,6 +347,9 @@ namespace tiles3d
         void adopt_completed_loads();
 
         void sync_content_visibility();
+
+        /// Per-second stage timing; TILES3D_TIMING=1 enables it. See report_timing().
+        void report_timing( uint64_t p_total_usec );
 
         /// Resolves a document URL (tileset.json, external tileset, subtree) against this
         /// node's `url`, so the same code serves a local path and an http URL.

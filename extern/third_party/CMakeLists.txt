@@ -9,6 +9,14 @@
 #
 # (FETCHCONTENT_SOURCE_DIR_<UPPERCASED_NAME> is a built-in FetchContent override and
 #  makes the corresponding GIT_REPOSITORY / URL unnecessary.)
+#
+# The checkout is per build directory, so configuring a SECOND preset - release after editor -
+# downloads all three again even though they are already on disk for the first one. On a build
+# machine that cannot reach github.com that turns every extra configuration into a hard failure:
+#   error: RPC failed; curl 56 Recv failure: Connection was reset
+# scripts/configure_release.bat passes the three overrides pointing at the editor build's
+# copies when they are present, and downloads as before when they are not. Only FetchContent'd dependencies are affected - godot-cpp is a submodule at
+# extern/godot-cpp and is never re-fetched.
 
 include( FetchContent )
 

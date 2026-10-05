@@ -126,6 +126,11 @@ namespace tiles3d
         /// surface sixty times a second for a parked camera, moving the origin by nothing.
         constexpr double kOriginShiftEpsilon = 1e-3;
 
+        /// How much of the camera's altitude is added to the origin-shift threshold. See
+        /// update_origin_shift(): the bound worth defending is the float32 step at the origin,
+        /// so the threshold follows altitude rather than sitting at a fixed distance.
+        constexpr double kOriginShiftAltitudeFactor = 0.5;
+
         /// Rotation-based direction interpolation that survives the near-antipodal case.
         ///
         /// Godot's Vector3::slerp builds its axis out of cross(from, to), which collapses to
@@ -997,7 +1002,22 @@ namespace tiles3d
 
         // Strictly less-than, so a threshold of 0 shifts on every frame that moves at all -
         // the strictest form of the technique, and the most expensive.
-        if ( origin_shift_distance_ < origin_shift_threshold_ )
+        //
+        // The configured threshold is a FLOOR; the real one grows with altitude. What this
+        // technique buys is precision, and precision is the quantisation step at the origin
+        // (distance / 2^24), not the distance itself - so pinning the distance at 1000 m
+        // over-serves the case that needs it least. A flight from orbit down to a city crosses
+        // 1.4e7 m, which a fixed threshold turns into fourteen thousand shifts, each one walking
+        // the whole loaded tile list and rewriting every on-screen content transform. That is
+        // the frame-rate collapse while flying in, and the HUD's `origin shift n=` is its count.
+        //
+        // Following altitude holds the step instead: 6e-5 m at the 1000 m floor, 3e-3 m at
+        // 100 km, 0.3 m at 10 000 km - invisible at every one of those ranges - and the count
+        // over a whole descent falls from thousands to tens.
+        const double threshold = std::max(
+            origin_shift_threshold_,
+            camera_height_above_ellipsoid() * kOriginShiftAltitudeFactor );
+        if ( origin_shift_distance_ < threshold )
         {
             return;
         }

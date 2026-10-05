@@ -199,6 +199,7 @@ func _ready() -> void:
 
 	# A recognisable opening view (default: over China), framed so the whole globe and its
 	# atmosphere fit comfortably.
+	_perf_sweep = OS.get_environment("GLOBE_PERF_SWEEP") != ""
 	_camera.orbit_to(start_longitude_degrees, start_latitude_degrees, start_distance)
 	_aim_sun()
 	_update_status()
@@ -555,6 +556,9 @@ func _update_status(prefix: String = "") -> void:
 		text += "\nsun  lon %.2f  lat %.2f" % [sub.x, sub.y]
 	_status.text = text
 
+var _perf_sweep := false
+var _perf_sweep_t := 0.0
+
 func _process(_delta: float) -> void:
 	if _camera == null:
 		return
@@ -567,6 +571,23 @@ func _process(_delta: float) -> void:
 	# signal is already gone by the time _ready gets here to connect to it, and the startup
 	# flight simply never happened. Watching for the dataset to become readable covers both
 	# orders, and it is the same condition the retry below needs anyway.
+	# GLOBE_PERF_SWEEP=1: drive a continuous zoom in and out around the loaded dataset, so a
+	# performance run can be reproduced from a script instead of from hand-driven mouse input.
+	# Zooming is the gesture that both piles up loaded tiles and crosses the origin-shift
+	# threshold repeatedly, and it was hand-driven input that made this the one workload nobody
+	# could re-run. Prints nothing itself; pair it with TILES3D_TIMING=1 for the stage breakdown.
+	if _perf_sweep and not _pending_flight and _tileset != null and _tileset.get_dataset_radius() > 0.0:
+		_perf_sweep_t += _delta
+		var period := 8.0
+		var phase := fmod(_perf_sweep_t, period) / period
+		var wave := 0.5 - 0.5 * cos(phase * TAU)
+		var radius: float = _tileset.get_dataset_radius()
+		var near_m: float = maxf(radius * 0.1, 60.0)
+		var far_m: float = radius * 8.0
+		var d: float = near_m * pow(far_m / near_m, wave)
+		_camera.call("orbit_to", _tileset.get_dataset_longitude(),
+				_tileset.get_dataset_latitude(), d)
+
 	if _initial_view_pending and not _pending_flight and _tileset != null \
 			and _tileset.get_dataset_radius() > 0.0:
 		_initial_view_pending = false

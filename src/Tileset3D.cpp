@@ -20,14 +20,21 @@
 #include "godot_cpp/classes/array_mesh.hpp"
 #include "godot_cpp/classes/base_material3d.hpp"
 #include "godot_cpp/classes/camera3d.hpp"
-// EditorInterface / SubViewport are only linked in an editor build (see the
-// TILES3D_EDITOR_TARGET note in the top level CMakeLists).
+// EditorInterface is only used inside TILES3D_EDITOR_TARGET blocks, so its header is behind the
+// same guard (see the TILES3D_EDITOR_TARGET note in the top level CMakeLists).
+//
+// RenderingServer is NOT: disconnect_pre_draw() runs from NOTIFICATION_EXIT_TREE, which every
+// build gets, and it is what keeps a destroyed node out of the server's frame_pre_draw list. With
+// this include inside the guard the release configuration failed to compile outright -
+// "error C2039: 'RenderingServer': is not a member of 'godot'" - which is the kind of thing a
+// build of the OTHER configuration is the only way to find.
+#include "godot_cpp/classes/rendering_server.hpp"
 #ifdef TILES3D_EDITOR_TARGET
 #include "godot_cpp/classes/editor_interface.hpp"
-#include "godot_cpp/classes/rendering_server.hpp"
 #include "godot_cpp/classes/sub_viewport.hpp"
 #endif
 #include "godot_cpp/classes/engine.hpp"
+#include "godot_cpp/classes/os.hpp"
 #include "godot_cpp/classes/time.hpp"
 #include "godot_cpp/classes/file_access.hpp"
 #include "godot_cpp/classes/http_client.hpp"
@@ -48,9 +55,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 namespace tiles3d
@@ -587,6 +596,9 @@ namespace tiles3d
                 // _process override: godot-cpp does not declare _process as a virtual on
                 // Node, so overriding it would not be called.
                 set_process( true );
+
+                timing_enabled_ = !godot::OS::get_singleton()->get_environment( "TILES3D_TIMING" )
+                                       .is_empty();
 
                 // The loader is a child node so its lifetime follows this node's, and so its
                 // HTTPRequest children are torn down with the scene.
@@ -1335,6 +1347,7 @@ namespace tiles3d
         dataset_center_raw_ = math::Vec3( 0.0 );
         dataset_root_is_region_ = false;
         dataset_corners_valid_ = false;
+        visible_tiles_.clear();
         loaded_bytes = 0;
         needs_framing = false;
         framing_frames_ = 0;
@@ -1661,6 +1674,8 @@ namespace tiles3d
 
     void Tileset3D::rebase( const Vector3 &p_parent_delta )
     {
+        const uint64_t rebase_begin =
+            timing_enabled_ ? godot::Time::get_singleton()->get_ticks_usec() : 0;
         // The traversal's model matrix produces coordinates in the georeference frame and the
         // result is written straight onto content nodes parented to *this* node, so a cached
         // worldMatrix lives in this node's own space. Taking this node's transform back out is
@@ -1696,7 +1711,24 @@ namespace tiles3d
             translation.y += delta.y;
             translation.z += delta.z;
 
-            node->set_transform( toGodotTransform( *tile->worldMatrix ) );
+            // The cached matrix is updated for every loaded tile - that is arithmetic, and it is
+            // the matrix sync_content_visibility() re-applies when a tile is shown. The NODE is
+            // only written for what is on screen: a hidden node's transform is not read by
+            // anything, and there are thousands of hidden tiles to a hundred-odd visible ones,
+            // so writing them all was the bulk of a shift (measured 1.11 ms, against a 10 ms
+            // frame). A hidden tile that is shown again gets its transform from the re-apply
+            // above, which is exactly the stale-transform case this split creates.
+            if ( node->is_visible() )
+            {
+                node->set_transform( toGodotTransform( *tile->worldMatrix ) );
+            }
+        }
+
+        if ( timing_enabled_ )
+        {
+            last_rebase_ms_ =
+                static_cast<double>( godot::Time::get_singleton()->get_ticks_usec() - rebase_begin ) /
+                1000.0;
         }
 
         // Nothing else here needs invalidating. Tile bounding spheres are re-derived from the
@@ -2632,15 +2664,29 @@ namespace tiles3d
         // own transform. "No conditional ancestor yet" is +infinity, which makes the root
         // decide purely on its screen space error - any finite seed would either force the
         // root to refine unconditionally or stop it refining at all.
-        traverse_tile( *root, compute_model_matrix(), view,
-                       std::numeric_limits<double>::infinity() );
+        const bool timing = timing_enabled_;
+        const uint64_t t_begin = timing ? godot::Time::get_singleton()->get_ticks_usec() : 0;
+        const math::Mat4 model = compute_model_matrix();
+        const uint64_t t_model = timing ? godot::Time::get_singleton()->get_ticks_usec() : 0;
+        traverse_tile( *root, model, view, std::numeric_limits<double>::infinity() );
+        const uint64_t t_traverse = timing ? godot::Time::get_singleton()->get_ticks_usec() : 0;
+        last_model_ms_ = static_cast<double>( t_model - t_begin ) / 1000.0;
 
         // The traversal has refreshed every priority this frame, so this is the point where
         // the ranking is meaningful. Loading itself happens on worker threads and over HTTP;
         // the two calls below only hand work over and take results back.
         dispatch_loads();
         adopt_completed_loads();
+        const uint64_t t_adopt = timing ? godot::Time::get_singleton()->get_ticks_usec() : 0;
         sync_content_visibility();
+        if ( timing )
+        {
+            const uint64_t t_visibility = godot::Time::get_singleton()->get_ticks_usec();
+            last_traverse_ms_ = static_cast<double>( t_traverse - t_begin ) / 1000.0;
+            last_adopt_ms_ = static_cast<double>( t_adopt - t_traverse ) / 1000.0;
+            last_visibility_ms_ = static_cast<double>( t_visibility - t_adopt ) / 1000.0;
+            report_timing( t_visibility - t_begin );
+        }
 
         last_rendered_count = render_list.size();
         if ( last_rendered_count > 0 )
@@ -2690,6 +2736,32 @@ namespace tiles3d
     void Tileset3D::traverse_tile( core::Tile &tile, const math::Mat4 &parent_world,
                                    const ViewState &view, const double nearest_conditional_ge )
     {
+        // Timing wrapper. The traversal is the whole of the scheduler's per-frame cost and the
+        // breakdown is not guessable from the outside: instruments the geometry block and the
+        // call as a whole with std::chrono (cheap, no Godot Variant traffic), and only when
+        // TILES3D_TIMING asked for it.
+        if ( !timing_enabled_ )
+        {
+            traverse_tile_inner( tile, parent_world, view, nearest_conditional_ge );
+            return;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        traverse_tile_inner( tile, parent_world, view, nearest_conditional_ge );
+        traverse_total_us_ += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0 )
+                .count() );
+        ++traverse_calls_;
+    }
+
+    void Tileset3D::traverse_tile_inner( core::Tile &tile, const math::Mat4 &parent_world,
+                                         const ViewState &view, const double nearest_conditional_ge )
+    {
+        std::chrono::steady_clock::time_point geo_begin;
+        if ( timing_enabled_ )
+        {
+            geo_begin = std::chrono::steady_clock::now();
+        }
         tile.touchedFrame = frame_number;
         tile.visible = false;
 
@@ -2720,6 +2792,15 @@ namespace tiles3d
         const double sse = math::computeScreenSpaceError( tile.geometricError, surfaceDistance,
                                                           view.viewportHeight, view.fovDegrees );
         tile.screenSpaceError = sse;
+
+        if ( timing_enabled_ )
+        {
+            traverse_geo_us_ += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - geo_begin )
+                    .count() );
+            ++traverse_geo_samples_;
+        }
 
         // A container for a nested tileset document is not content, and must never be requested
         // as if it were: the document arrives through the external-tileset queue (see
@@ -3079,41 +3160,87 @@ namespace tiles3d
         }
     }
 
+    void Tileset3D::report_timing( const uint64_t p_total_usec )
+    {
+        // Once a second, and only with TILES3D_TIMING set. Stage costs are what an optimisation
+        // has to be measured against, and none of this is visible from the outside: the frame
+        // time says something is expensive, not what.
+        const double now = static_cast<double>( godot::Time::get_singleton()->get_ticks_msec() );
+        if ( now - last_timing_report_ms_ < 1000.0 )
+        {
+            return;
+        }
+        last_timing_report_ms_ = now;
+        UtilityFunctions::print( godot::vformat(
+            "[Tileset3D timing] total %.2f ms | traverse %.2f of which geo %.2f/s | "
+            "model %.2f | loads %.2f | visibility %.2f | calls %d/s | loaded %d rendered %d",
+            static_cast<double>( p_total_usec ) / 1000.0, last_traverse_ms_,
+            static_cast<double>( traverse_geo_us_ ) / 1000.0, last_model_ms_, last_adopt_ms_,
+            last_visibility_ms_, static_cast<int>( traverse_calls_ ),
+            static_cast<int>( loaded_tiles.size() ),
+            static_cast<int>( render_list.size() ) ) );
+        traverse_geo_us_ = 0;
+        traverse_total_us_ = 0;
+        traverse_calls_ = 0;
+        traverse_geo_samples_ = 0;
+    }
+
     void Tileset3D::sync_content_visibility()
     {
-        // Hide everything that is loaded, then reveal the selection. Walking the loaded list
-        // rather than the tile tree keeps this proportional to what is actually attached.
-        for ( core::Tile *tile : loaded_tiles )
+        // Only what CHANGED is touched.
+        //
+        // This used to hide every loaded tile and then reveal the selection: two walks over the
+        // loaded list with a Godot set_visible() per entry, every frame, to produce a change of
+        // a handful. The loaded list is not small - one city dataset holds over a thousand
+        // loaded tiles while 150-odd are drawn - so the redundant calls were milliseconds a
+        // frame on their own, plus the same order of work again in rebase().
+        //
+        // Correctness rests on two things: a tile that leaves the render list is hidden, and a
+        // tile that enters it is shown AND has its world matrix re-applied (it may have been
+        // hidden across an origin shift, and only visible nodes are updated there).
+        std::unordered_set<core::Tile *> rendered;
+        if ( show )
+        {
+            rendered.reserve( render_list.size() * 2 );
+            for ( core::Tile *tile : render_list )
+            {
+                if ( tile != nullptr && tile->contentUserData != nullptr &&
+                     tile->contentState == core::ContentState::Ready )
+                {
+                    rendered.insert( tile );
+                }
+            }
+        }
+
+        for ( core::Tile *tile : visible_tiles_ )
+        {
+            if ( rendered.find( tile ) == rendered.end() )
+            {
+                auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
+                if ( node != nullptr )
+                {
+                    node->set_visible( false );
+                }
+            }
+        }
+
+        visible_tiles_.clear();
+        visible_tiles_.reserve( rendered.size() );
+        for ( core::Tile *tile : rendered )
         {
             auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
             if ( node != nullptr )
             {
-                node->set_visible( false );
-            }
-        }
-
-        // The master `show` toggle suppresses the whole subtree; otherwise reveal the tiles
-        // the traversal selected for rendering this frame.
-        if ( show )
-        {
-            for ( core::Tile *tile : render_list )
-            {
-                if ( tile->contentUserData == nullptr ||
-                     tile->contentState != core::ContentState::Ready )
-                {
-                    continue;
-                }
-
-                auto *node = static_cast<godot::Node3D *>( tile->contentUserData );
+                // Unconditionally, not only on the transition: it costs one call for a tile
+                // that is on screen, and it is what keeps content right if the georeference or
+                // this node moved after the tile was loaded.
                 node->set_visible( true );
-
-                // Re-apply the world matrix: cheap, and it keeps content correct if the
-                // georeference or this node moves after the tile was loaded.
                 if ( tile->worldMatrix.has_value() )
                 {
                     node->set_transform( toGodotTransform( *tile->worldMatrix ) );
                 }
             }
+            visible_tiles_.push_back( tile );
         }
 
         if ( debug_mesh != nullptr )

@@ -73,6 +73,8 @@ const TILT_MAX := 1.5707963             # PI / 2
 
 const DISTANCE_MIN_FACTOR := 0.02       # closest approach, as a fraction of the framed distance
 const DISTANCE_MAX_FACTOR := 12.0
+# How often the on-screen parameter panel is rebuilt. See _update_hud().
+const HUD_REFRESH_SECONDS := 0.25
 # How far the pivot may be panned from the dataset centre, in dataset radii. Panning without a
 # limit walks the view off the data and the user has no way to tell how far they have gone.
 const PAN_LIMIT_RADII := 2.0
@@ -115,6 +117,25 @@ func _ready() -> void:
 	_tileset.framing_released.connect(_on_framing_released)
 	_build_environment()
 	_build_ui()
+	_motion_enabled = OS.get_environment("ST_MOTION") != ""
+	# ST_HIDE=1 hides the tileset's whole subtree: the traversal still runs, nothing is drawn. The
+	# difference against a normal run is the renderer's share, which is what says whether a frame
+	# is being spent on tiles at all.
+	# ST_LOADS=<n> overrides the concurrent in-flight limit. The default is tuned for throughput;
+	# the question a frame-rate run asks is different, because every in-flight request is a worker
+	# competing with the main thread for the same cores.
+	var loads := OS.get_environment("ST_LOADS")
+	if loads != "":
+		_tileset.maximum_simultaneous_loads = int(loads)
+	# ST_UPLOADS=<n> overrides how many decoded tiles may be turned into nodes per frame. That
+	# assembly runs on the main thread and costs about 2 ms per tile on photogrammetry, so this
+	# is what decides how much of a frame a streaming burst is allowed to take.
+	var uploads := OS.get_environment("ST_UPLOADS")
+	if uploads != "":
+		_tileset.maximum_uploads_per_frame = int(uploads)
+	if OS.get_environment("ST_HIDE") != "":
+		_tileset.show = false
+	_stats_enabled = OS.get_environment("ST_STATS") != ""
 	_shot_path = OS.get_environment("ST_SHOT")
 	if OS.get_environment("ST_SHOT_AT") != "":
 		_shot_at = float(OS.get_environment("ST_SHOT_AT"))
@@ -142,25 +163,45 @@ func _build_environment() -> void:
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var bar := HBoxContainer.new()
-	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	bar.offset_top = 10.0
-	bar.offset_bottom = 42.0
-	bar.offset_right = -12.0
-	bar.alignment = BoxContainer.ALIGNMENT_END
-	bar.add_theme_constant_override("separation", 8)
-	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	layer.add_child(bar)
 
+	# Dataset picker, top-left, and NOT a row in a bar shared with the HUD.
+	#
+	# A Control clamps its own size to its children's minimum, so putting a five-line label and
+	# an OptionButton in one HBoxContainer stretches the button to the height of the text block:
+	# a 30 px control in a 100 px row, with the empty middle showing. Two independent controls
+	# anchored to the two corners cannot do that to each other.
 	_picker = OptionButton.new()
+	_picker.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_picker.offset_left = 12.0
+	_picker.offset_top = 10.0
+	_picker.custom_minimum_size = Vector2(260.0, 32.0)
+	layer.add_child(_picker)
 	for entry in DATASETS:
 		_picker.add_item(entry["label"])
 	_picker.item_selected.connect(_on_picker_selected)
-	bar.add_child(_picker)
+
+	# Parameters, top-right. A PanelContainer rather than a bare Label: the numbers sit over
+	# airborne imagery and need a background of their own to stay readable.
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	# Explicit: with the right edge anchored, the panel has to grow leftwards to fit its text.
+	# set_anchors_preset() sets the anchors only, so the grow direction is stated here.
+	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	panel.offset_right = -12.0
+	panel.offset_top = 10.0
+	# Clicks in the empty corner around the text belong to the viewport, not to the panel.
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var panel_style := StyleBoxFlat.new()
+	panel_style.bg_color = Color(0.06, 0.07, 0.09, 0.72)
+	panel_style.set_corner_radius_all(6)
+	panel_style.set_content_margin_all(8)
+	panel.add_theme_stylebox_override("panel", panel_style)
+	layer.add_child(panel)
 
 	_status = Label.new()
-	_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	bar.add_child(_status)
+	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_status.add_theme_font_size_override("font_size", 13)
+	panel.add_child(_status)
 
 func _entry_for_url(url: String) -> Dictionary:
 	for entry in DATASETS:
@@ -314,12 +355,15 @@ func _clamp_rig() -> void:
 # left-drag has already pushed off to one side, and turning about that point swings it out of
 # frame. Turning about the model's centre keeps it exactly where the viewport put it.
 func _apply_tilt_drag(relative: Vector2) -> void:
-	# Horizontal: about the model's own up, unbounded. `+=` is the globe's sense (its angle is
-	# `+1 * rate * (-dx/width) * 2PI` about the same axis). Swap to `-=` for the other
-	# convention - the one where the surface under the cursor sticks to the cursor. They are
-	# opposite gestures and neither is wrong; measured, the near face moves 206 px for a 200 px
-	# drag at `-=`, and exactly the other way at `+=`.
-	_rotate_rigid(_up, relative.x * SPIN_PER_PIXEL)
+	# Horizontal: about the model's own up, unbounded.
+	#
+	# The sign makes a rightward drag turn the model right, which is what the eye expects of a
+	# city block under the cursor. This has been got wrong twice: the globe's own tilt works out
+	# to the opposite sign (it is a planet seen from outside, turning away from the drag), and an
+	# earlier attempt at proving the direction numerically measured a near-face probe instead of
+	# asking the person looking at the screen. If it ever reads backwards again, this is the
+	# single sign to flip.
+	_rotate_rigid(_up, -relative.x * SPIN_PER_PIXEL)
 
 	# Vertical: tilt, clamped to the 0-90 degree range. The axis is `up x offset`, which lies in
 	# the plane the eye moves in, so the eye stays in that plane and the rotation angle is the
@@ -342,6 +386,14 @@ func _dolly(factor: float) -> void:
 	_offset = _offset.normalized() * length
 	_apply_camera()
 
+var _motion_enabled := false
+var _stats_enabled := false
+var _motion_time := 0.0
+var _stats_elapsed := 0.0
+var _frame_ms_smoothed := 0.0
+var _frame_history: Array[float] = []
+var _hud_elapsed := 0.0
+
 # ST_SHOT=<absolute png path> ST_SHOT_AT=<seconds>: save the viewport and quit. The runtime
 # window cannot be screenshotted from outside in every environment (no window shows up in the
 # desktop enumeration here at all), but reading the viewport texture from inside the engine
@@ -363,8 +415,109 @@ func _process(delta: float) -> void:
 					image.get_height()])
 			get_tree().quit()
 			return
+	if _stats_enabled:
+		_frame_history.push_back(delta)
+		if _frame_history.size() > 600:
+			_frame_history.remove_at(0)
+	if _motion_enabled and _camera != null:
+		_drive_motion(delta)
 	if _status == null:
 		return
-	_status.text = "  左键平移   右键左右绕中心轴 / 上下倾斜(0-90°)   滚轮缩放    距离 %.0f m   高度 %.0f m   仰角 %.0f°   半径 %.0f m" % [
-		_offset.length(), _eye_height(), 90.0 - rad_to_deg(_tilt_of_offset()),
-		float(_tileset.dataset_radius)]
+	_stats_elapsed += delta
+	_update_hud(delta)
+
+# The frame time, smoothed: the instantaneous number swings by half on any one frame, and an
+# optimisation is judged on where it settles.
+func _frame_ms() -> float:
+	var ms := 1000.0 / maxf(Engine.get_frames_per_second(), 1.0)
+	_frame_ms_smoothed = ms if _frame_ms_smoothed <= 0.0 else lerpf(_frame_ms_smoothed, ms, 0.15)
+	return _frame_ms_smoothed
+
+func _tile_lines() -> String:
+	if _tileset == null:
+		return "no tileset"
+	return "tiles  %d declared / %d loaded / %d rendered / %d in-flight  %s\nradius %.0f m   sse %.1f" % [
+		int(_tileset.tile_count), int(_tileset.loaded_tile_count),
+		int(_tileset.last_rendered_count), int(_tileset.in_flight_count),
+		_human_bytes(int(_tileset.loaded_bytes)), float(_tileset.dataset_radius),
+		float(_tileset.maximum_screen_space_error)]
+
+func _human_bytes( value: int ) -> String:
+	if value < 1024:
+		return "%d B" % value
+	if value < 1024 * 1024:
+		return "%.0f KiB" % (value / 1024.0)
+	return "%.1f MiB" % (value / (1024.0 * 1024.0))
+
+func _update_hud( delta: float ) -> void:
+	# Refreshed at a few hertz, NOT every frame. RenderingServer.get_rendering_info() is a query
+	# into the renderer, not a counter read, and building the panel text allocates a string every
+	# time - both of which belong on the same side of the frame as anything else worth avoiding.
+	# globe_hud.gd throttles for the same reason; this one did not, and the process phase was
+	# measured at 46 ms a frame on a scene that draws 71 calls.
+	_hud_elapsed += delta
+	if _hud_elapsed < HUD_REFRESH_SECONDS:
+		return
+	_hud_elapsed = 0.0
+	var draws := RenderingServer.get_rendering_info(
+			RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+	var prims := RenderingServer.get_rendering_info(
+			RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
+	var eye := _camera.global_position if _camera != null else Vector3.ZERO
+	_status.text = (
+			"fps %d   frame %.2f ms   draws %d   prims %s\n" +
+			"cam local %s   dist %.0f m   above plane %.0f m   tilt %.0f deg\n" +
+			"%s\n" +
+			"near %.2f  far %.0f\n" +
+			"L 平移   R 绕中心轴旋转 / tilt(0-90)   wheel 缩放") % [
+		Engine.get_frames_per_second(), _frame_ms(), draws, _human_bytes(prims),
+		_fmt_vec(eye), _offset.length(), _eye_height(), 90.0 - rad_to_deg(_tilt_of_offset()),
+		_tile_lines(), float(_camera.near), float(_camera.far)]
+	if _stats_enabled:
+		_emit_stats(draws, prims)
+
+func _fmt_vec( v: Vector3 ) -> String:
+	return "(%.0f, %.0f, %.0f)" % [v.x, v.y, v.z]
+
+# ST_STATS=1: the same numbers, once a second, on stdout. The on-screen HUD cannot be read from a
+# script, and an optimisation has to be measured, not looked at.
+#
+# Percentiles, not an average. The first version of this printed the smoothed frame time, which
+# read 113-120 fps on a run that was visibly stuttering down to 48: a 1 Hz sample of a
+# smoothed series hides the tail entirely, and the tail is the whole complaint. p50 says what the
+# frame time usually is, p99 and max say how bad it gets, and "over 1.5x" counts the frames a
+# person would notice.
+func _emit_stats( draws: int, prims: int ) -> void:
+	if _stats_elapsed < 1.0:
+		return
+	_stats_elapsed = 0.0
+	var sorted := _frame_history.duplicate()
+	sorted.sort()
+	var count := sorted.size()
+	if count == 0:
+		return
+	var p := func( frac: float ) -> float:
+		return sorted[clampi(int(frac * (count - 1)), 0, count - 1)] * 1000.0
+	var median: float = p.call(0.5)
+	var over := 0
+	for value in sorted:
+		if value > median * 1.5:
+			over += 1
+	print("[st] p50 %.2f  p90 %.2f  p99 %.2f  max %.2f ms  (%d/%d over %.1f)  script %.2f ms | loaded %d rendered %d inflight %d %.1f MiB | draws %d prims %d" % [
+		median, p.call(0.9), p.call(0.99), sorted[count - 1] * 1000.0, over, count,
+		median * 1.5,
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		int(_tileset.loaded_tile_count), int(_tileset.last_rendered_count),
+		int(_tileset.in_flight_count), float(_tileset.loaded_bytes) / (1024.0 * 1024.0),
+		draws, prims])
+	_frame_history.clear()
+
+# ST_MOTION=1: drive the same two gestures the mouse would, on a sine, so frame rate UNDER MOTION
+# can be captured from a script. Hand-driven input is what made every earlier performance claim
+# here unrepeatable, and the gestures are the workload: a parked camera and a camera that keeps
+# turning and zooming are not the same test.
+func _drive_motion( delta: float ) -> void:
+	_motion_time += delta
+	_apply_tilt_drag(Vector2(sin(_motion_time * TAU / 12.0) * 5.0,
+			sin(_motion_time * TAU / 17.0) * 1.5))
+	_dolly(1.0 + 0.006 * cos(_motion_time * TAU / 9.0))
