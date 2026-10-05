@@ -48,74 +48,101 @@ const DATASETS := [
 	{
 		"label": "Photogrammetry 1.1 (disk)",
 		"url": "E:/GISData/3D Tiles/1.1/Photogrammetry/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "Photogrammetry 1.0 (disk)",
 		"url": "E:/GISData/3D Tiles/1.0/Photogrammetry/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "weinan",
 		"url": "E:/GISData/3D Tiles/weinan/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "taiwan",
 		"url": "E:/GISData/3D Tiles/taiwan/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "test",
 		"url": "E:/GISData/3D Tiles/test/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "Icospheres",
 		"url": "E:/GISData/3D Tiles/Icospheres/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "texturessphere",
 		"url": "E:/GISData/3D Tiles/texturessphere/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "Aerometrex SanFrancisco 2cm (known corrupt: deep tree missing)",
 		"url": "E:/GISData/3D Tiles/Aerometrex-SanFrancisco-2cm/tileset.json",
+		"sse": 4.0,
+		# The mesh is authored on the NAVD88 orthometric datum (sea level), which in San
+		# Francisco sits about 31.5 m BELOW the WGS84 ellipsoid - the geoid undulation N,
+		# h_ellipsoid = H_orthometric + N with N ~ -31.5 m. Our base imagery drapes the
+		# ellipsoid (h = 0), so without this lift the waterfront half of the model sinks
+		# under the globe surface. Cesium's own Sandcastle does not sink it because that
+		# demo mounts Cesium World Terrain, whose coastline lands on the same -31.5 m
+		# surface the model was built on; with a bare ellipsoid Cesium would sink it too.
+		# Compensate by lifting the dataset onto the ellipsoid.
+		"height_offset": 31.5,
 	},
 	{
 		"label": "samples 1.0 DiscreteLOD",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithDiscreteLOD/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.0 RequestVolume",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithRequestVolume/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.0 TreeBillboards",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.0/TilesetWithTreeBillboards/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.1 MetadataGranularities",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/MetadataGranularities/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.1 MultipleContents",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/MultipleContents/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.1 SparseImplicitOctree",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/SparseImplicitOctree/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.1 SparseImplicitQuadtree",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/SparseImplicitQuadtree/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples 1.1 TilesetWithFullMetadata",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/1.1/TilesetWithFullMetadata/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "samples glTF GpuInstancesMetadata",
 		"url": "E:/GISData/3D Tiles/3d-tiles-samples/glTF/GpuInstancesMetadata/tileset.json",
+		"sse": 16.0,
 	},
 	{
 		"label": "weinan (http smoke test, localhost:9090)",
 		"url": "http://localhost:9090/3D Tiles/weinan/tileset.json",
+		"sse": 16.0,
 	},
 ]
 
@@ -123,6 +150,7 @@ var _camera: Camera3D = null
 var _tileset: Node = null
 var _status: Label = null
 var _picker: OptionButton = null
+var _skybox_on := true
 var _was_flying := false
 # Set between "the picker asked for a dataset" and "that dataset finished loading": the load
 # handler has to know whether to fly, or whether it is just a first load reporting in.
@@ -326,6 +354,60 @@ func _rebase_to_dataset() -> void:
 		layer.call("reload_tiles")
 		await get_tree().process_frame
 
+	_apply_height_offset()
+	_apply_sse()
+
+# Applies the dataset entry's optional "sse" (maximumScreenSpaceError). Cesium's Sandcastle
+# demos tune this per dataset - the Aerometrex San Francisco photogrammetry asks for 4
+# (2 cm/px meshes want aggressive refinement), the generic 3D Tiles default is 16. The
+# setter is a plain field write the scheduler reads every frame, so it can be applied
+# before or after the load either way.
+func _apply_sse() -> void:
+	if _tileset == null:
+		return
+	var entry := _entry_for_url(_tileset.url)
+	_tileset.call("set_maximum_screen_space_error", float(entry.get("sse", 16.0)))
+
+# Lifts (or lowers) the tileset content by the dataset entry's optional "height_offset",
+# measured along the surface normal at the origin.
+#
+# Why this exists: photogrammetry datasets are frequently authored on an orthometric datum
+# (sea level), and sea level is NOT the WGS84 ellipsoid our base imagery drapes - the gap is
+# the geoid undulation, about -31.5 m in San Francisco. The dataset's ECEF placement is
+# correct as authored; the sink is a datum mismatch against the bare-ellipsoid base, which
+# Cesium's Sandcastle hides by mounting Cesium World Terrain (whose coastline sits on the
+# same sea-level surface the mesh was built on). We have no terrain, so the compensation is
+# explicit: a per-dataset offset that rides on the Tileset3D node's own transform. Content
+# tiles are children of that node and rebase/origin-shift only touch their own transforms,
+# so the lift survives streaming, rebases and origin shifts untouched.
+func _apply_height_offset() -> void:
+	var node := get_node_or_null("Georeference3D/Tileset3D") as Node3D
+	if node == null:
+		return
+	var entry := _entry_for_url(_tileset.url if _tileset != null else "")
+	var offset: float = float(entry.get("height_offset", 0.0))
+	if is_zero_approx(offset):
+		node.transform = Transform3D()
+		return
+	var carrier := get_node_or_null("Georeference3D") as Node3D
+	var globe := get_node_or_null("Georeference3D/Globe3D")
+	if carrier == null or globe == null:
+		return
+	# The surface normal at the ENU origin, expressed in the Tileset3D node's parent space
+	# (the frame carrier): the direction from the ellipsoid centre to the origin. The origin
+	# IS the carrier's local zero, so up = -centre, with the centre read through Globe3D
+	# (which owns the ECEF conversion) and re-expressed in carrier space.
+	var centre_global: Vector3 = globe.to_global(globe.call("ecef_to_local", Vector3.ZERO))
+	var centre_carrier: Vector3 = carrier.to_local(centre_global)
+	var up: Vector3 = -(centre_carrier as Vector3).normalized()
+	node.transform = Transform3D(Basis(), up * offset)
+
+func _entry_for_url(url: String) -> Dictionary:
+	for entry in DATASETS:
+		if entry["url"] == url:
+			return entry
+	return {}
+
 # One float32 representable step at `magnitude`. Everything in a Godot transform is float32
 # unless the engine is built with double precision, so this is the floor on how precisely a
 # vertex or a camera position at that range can be placed - and a jitter is exactly this
@@ -469,6 +551,8 @@ func _process(_delta: float) -> void:
 			and _tileset.get_dataset_radius() > 0.0:
 		_initial_view_pending = false
 		_status.text = "framing the startup dataset ..."
+		# The height offset is applied inside _rebase_to_dataset(), so both the startup
+		# path and a picker switch get it from the same place.
 		await _rebase_to_dataset()
 		# A pick during the rebase owns the camera now; its own load handler will fly.
 		if not _pending_flight:
@@ -547,6 +631,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_camera.orbit_to(105.0, 25.0, 6800000.0)    # skimming the surface
 		KEY_A:
 			_toggle("Georeference3D/Globe3D", "show_atmosphere")
+		KEY_B:
+			_toggle_skybox()
 		KEY_G:
 			_toggle("Georeference3D/Globe3D", "show_graticule")
 		KEY_S:
@@ -560,6 +646,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Steps the sunset tint, so the terminator can be dialled between physically
 			# neutral (0.0) and the demo default (0.65).
 			_cycle_sunset_tint()
+
+# Backs the sky off to a plain background, so the panorama can be judged against something
+# neutral. The sky itself is scene data - a PanoramaSkyMaterial on the environment - so this only
+# flips the background mode and never touches the material.
+func _toggle_skybox() -> void:
+	var env_node := get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if env_node == null or env_node.environment == null:
+		return
+	var environment := env_node.environment
+	_skybox_on = not _skybox_on
+	environment.background_mode = Environment.BG_SKY if _skybox_on else Environment.BG_COLOR
+	_update_status()
+
 
 func _toggle(node_path: String, property: String) -> void:
 	var node := get_node_or_null(node_path)
