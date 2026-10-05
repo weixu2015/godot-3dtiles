@@ -24,6 +24,7 @@
 // TILES3D_EDITOR_TARGET note in the top level CMakeLists).
 #ifdef TILES3D_EDITOR_TARGET
 #include "godot_cpp/classes/editor_interface.hpp"
+#include "godot_cpp/classes/rendering_server.hpp"
 #include "godot_cpp/classes/sub_viewport.hpp"
 #endif
 #include "godot_cpp/classes/engine.hpp"
@@ -54,6 +55,18 @@
 
 namespace tiles3d
 {
+
+    /// Frames the editor framing pose is re-applied for before the camera is released.
+    constexpr int kFramingFrames = 5;
+    /// Upper bound on that hold, so a camera that never resolves is not pinned forever.
+    constexpr int kFramingFrameCap = 600;
+    /// Radians per degree, for the frustum maths.
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    /// Slack on the fitted framing distance. The fit is exact, so this is only there to keep
+    /// the wireframe off the very edge of the viewport where it reads as "cut off".
+    constexpr double kFramingMargin = 1.15;
+    /// Frames between rebuilds of the debug wireframe while the aid is on.
+    constexpr int kDebugMeshRefreshFrames = 15;
 
     /// Monotonic seconds, for the request deadline and the socket idle limit. Time::get_ticks_msec
     /// is monotonic where OS::get_ticks_usec is wall-clock, and this is a duration, not a date.
@@ -161,10 +174,30 @@ namespace tiles3d
             }
         }
 
+        /// True for a tile whose content is on screen or about to be replaced. A subtree
+        /// below one of these is not reachable in any state the scheduler can produce, because
+        /// a parent is always loaded before its children.
+        bool tileIsLoaded( const core::Tile &tile )
+        {
+            return tile.contentState == core::ContentState::Ready ||
+                   tile.contentState == core::ContentState::Expired;
+        }
+
+        /// Wireframe edges for the LOADED tiles only, and pruning at the first unloaded tile.
+        ///
+        /// Drawing the whole tree was never useful: a dataset with a few thousand tiles turns
+        /// into a solid mat of wire that hides the thing it is supposed to be helping with, and
+        /// the boxes of tiles that are not on screen describe nothing that is there. What the
+        /// aid is for is "where did the data I can see just come from", so that is what it draws.
         void collectTileEdges( const core::Tile &tile, const math::Mat4 &parentWorld, double scale,
                                bool colorize, PackedVector3Array &vertices,
                                PackedColorArray &colors )
         {
+            if ( !tileIsLoaded( tile ) )
+            {
+                return;
+            }
+
             const math::Mat4 world = math::multiply( parentWorld, tile.transform );
 
             if ( tile.boundingVolume.has_value() )
@@ -398,6 +431,21 @@ namespace tiles3d
                               &Tileset3D::get_auto_frame_on_load );
         ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "auto_frame_on_load" ),
                                "set_auto_frame_on_load", "get_auto_frame_on_load" );
+        ClassDB::bind_method( D_METHOD( "set_manage_editor_clip", "p_value" ),
+                              &Tileset3D::set_manage_editor_clip );
+        ClassDB::bind_method( D_METHOD( "get_manage_editor_clip" ),
+                              &Tileset3D::get_manage_editor_clip );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::BOOL, "manage_editor_clip" ),
+                               "set_manage_editor_clip", "get_manage_editor_clip" );
+
+        // Bound so the RenderingServer frame_pre_draw Callable can resolve it by name.
+        ClassDB::bind_method( D_METHOD( "_on_frame_pre_draw" ), &Tileset3D::_on_frame_pre_draw );
+        ADD_SIGNAL( godot::MethodInfo( "framing_released" ) );
+        ClassDB::bind_method( D_METHOD( "set_dataset_up_axis", "p_value" ),
+                              &Tileset3D::set_dataset_up_axis );
+        ClassDB::bind_method( D_METHOD( "get_dataset_up_axis" ), &Tileset3D::get_dataset_up_axis );
+        ClassDB::add_property( "Tileset3D", PropertyInfo( Variant::VECTOR3, "dataset_up_axis" ),
+                               "set_dataset_up_axis", "get_dataset_up_axis" );
 
         ClassDB::bind_method( D_METHOD( "set_debug_print_lod", "p_value" ),
                               &Tileset3D::set_debug_print_lod );
@@ -496,6 +544,15 @@ namespace tiles3d
         ClassDB::bind_method( D_METHOD( "get_dataset_radius" ), &Tileset3D::get_dataset_radius );
         ClassDB::add_property( "Tileset3D", readonly_float( "dataset_radius" ), "",
                                "get_dataset_radius" );
+        // The dataset centre in this node's local space, i.e. the point automatic framing
+        // aims at. Exposed because a script that wants to orbit or dolly around the data -
+        // which is the only way to look at a single dataset interactively - needs somewhere
+        // to orbit around, and this is that point. Under the implicit frame it is millions
+        // of metres from the node origin, so it cannot be guessed from the transform.
+        ClassDB::bind_method( D_METHOD( "get_dataset_center_local" ),
+                              &Tileset3D::get_dataset_center_local );
+        ClassDB::add_property( "Tileset3D", readonly_vector3( "dataset_center_local" ), "",
+                               "get_dataset_center_local" );
         ClassDB::bind_method( D_METHOD( "get_anchor_separation" ),
                               &Tileset3D::get_anchor_separation );
         ClassDB::add_property( "Tileset3D", readonly_float( "anchor_separation_m" ), "",
@@ -547,11 +604,36 @@ namespace tiles3d
                 {
                     load();
                 }
+#ifdef TILES3D_EDITOR_TARGET
+                // Re-assert the clip planes the instant before every frame is drawn. The
+                // editor writes its own 0.1/4000 while navigating, so a write from the load
+                // frame loses that race for the whole inertia tail - and a dataset framed
+                // from kilometres away is exactly what a 4000 m far plane erases. A scene
+                // with no globe has no GlobeTileLayer to do this, which is why it is here.
+                godot::Engine *ready_engine = godot::Engine::get_singleton();
+                if ( ready_engine != nullptr && ready_engine->is_editor_hint() &&
+                     !pre_draw_connected_ )
+                {
+                    godot::RenderingServer *rs = godot::RenderingServer::get_singleton();
+                    if ( rs != nullptr )
+                    {
+                        rs->connect( "frame_pre_draw",
+                                     godot::Callable( this, "_on_frame_pre_draw" ) );
+                        pre_draw_connected_ = true;
+                    }
+                }
+#endif
                 break;
             }
 
             case NOTIFICATION_PROCESS:
                 update_tiles();
+                break;
+
+            case NOTIFICATION_EXIT_TREE:
+                // The RenderingServer outlives the scene; a Callable left pointing at a
+                // freed node is a use-after-free on the next editor frame.
+                disconnect_pre_draw();
                 break;
 
             default:
@@ -699,6 +781,16 @@ namespace tiles3d
     bool Tileset3D::get_auto_frame_on_load() const
     {
         return auto_frame_on_load;
+    }
+
+    void Tileset3D::set_manage_editor_clip( const bool p_value )
+    {
+        manage_editor_clip = p_value;
+    }
+
+    bool Tileset3D::get_manage_editor_clip() const
+    {
+        return manage_editor_clip;
     }
 
     void Tileset3D::set_debug_colorize_tiles( const bool p_value )
@@ -892,62 +984,305 @@ namespace tiles3d
 
     void Tileset3D::frame_camera()
     {
-#ifdef TILES3D_EDITOR_TARGET
-        godot::Engine *engine = godot::Engine::get_singleton();
-        if ( engine == nullptr || !engine->is_editor_hint() )
-        {
-            return;
-        }
         if ( dataset_radius <= 0.0 )
         {
             return;
         }
 
-        // A Globe3D in the same scene owns the editor camera; see has_globe_in_scene().
-        godot::Node *scene_root = this;
+        // Whichever camera this framing is allowed to move: the editor's free camera while
+        // editing, or the scene's own camera at runtime, so a single-dataset scene opens
+        // looking at its data instead of at the world origin from inside it. Null when a
+        // Globe3D owns the camera, or when there is no camera at all.
+        godot::Camera3D *camera = resolve_framing_camera();
+        if ( camera == nullptr )
+        {
+            return;
+        }
+
+        // Only the implicit frame gets automatic framing. With a Georeference3D ancestor the
+        // dataset's position in the render frame is a number a person put there, and that
+        // scene brings its own camera to match; re-framing it would throw their calibration
+        // away on every load. This mirrors the `auto_frame_on_load` property's own default of
+        // not touching anything the engine was not asked to place.
+        if ( placed_by_georeference )
+        {
+            return;
+        }
+
+        const godot::Vector3 target =
+            get_global_transform().xform( toGodotVector( dataset_center_ ) );
+
+        // The eight box corners in world space, as offsets from the target. Framing a SPHERE
+        // of the same radius is what this used to do, and it is not enough: a cube inscribed
+        // in that sphere has corners sqrt(3) further out than the sphere, so up to 73% of the
+        // wireframe fell outside the frustum - which is exactly the "bounding box is cut off"
+        // report. The corners are the honest bound.
+        godot::Vector3 corners[8];
+        if ( !dataset_box_corners( corners ) )
+        {
+            return;
+        }
+
+        // Up. The model's own up, so the view is not arbitrarily rolled: for a dataset left
+        // in ECEF by the implicit frame that is the geodetic up at its own centre, which is
+        // the radial direction - 37.8 degrees away from ECEF's own Z axis at San Francisco,
+        // enough to make a "level" horizon visibly tilted. `dataset_up_axis` overrides it for
+        // a dataset authored in some other space. This only ever steers a camera; it cannot
+        // move content, which is why the ECEF-scale test behind the default is acceptable here
+        // when the same test is forbidden for placement.
+        godot::Vector3 up_axis = dataset_up_axis;
+        if ( up_axis.length_squared() < 1e-12f )
+        {
+            // glm::length(), NOT the member .length(): on this GLM (1.0.1) the member on a
+            // dvec3 hands back 3.0 for a vector of 6.37e6, which made the ECEF test below
+            // always fail and silently framed every dataset with a world +Y up. The free
+            // function is what normalizeSafe() uses, and it is right.
+            const double radial_length = glm::length( dataset_center_ );
+            up_axis = radial_length > 1.0e6
+                          ? get_global_transform().basis.xform(
+                                toGodotVector( math::normalizeSafe( dataset_center_ ) ) )
+                          : godot::Vector3( 0.0f, 1.0f, 0.0f );
+        }
+        up_axis = up_axis.normalized();
+
+        // The horizontal half-angle comes from the viewport's aspect, so a tall narrow editor
+        // viewport fits the dataset too instead of overflowing sideways.
+        godot::SubViewport *viewport = editor_viewport();
+        const double fov_v = static_cast<double>( camera->get_fov() ) * kDegToRad;
+        double tan_half_v = std::tan( fov_v * 0.5 );
+        if ( viewport != nullptr )
+        {
+            const godot::Rect2 rect = viewport->get_visible_rect();
+            if ( rect.size.y > 0.0f )
+            {
+                tan_half_v *= static_cast<double>( rect.size.x / rect.size.y );
+            }
+        }
+        const double tan_half_h = tan_half_v;
+
+        // The view direction, looking DOWN at the model: `eye = target - forward * distance`,
+        // so a forward with a POSITIVE up component would put the eye below the data and the
+        // view underneath it - a city model is a plate, and from below it is a sliver on the
+        // horizon. Hence the negative coefficient, which is the whole difference between
+        // looking at a model and looking at its underside.
+        const godot::Vector3 side = up_axis.cross( godot::Vector3( 0.0f, 0.0f, 1.0f ) );
+        const godot::Vector3 reference = side.length_squared() > 1e-6f
+                                              ? side.normalized()
+                                              : godot::Vector3( 1.0f, 0.0f, 0.0f );
+        const godot::Vector3 forward = ( reference * 0.55f - up_axis * 0.45f ).normalized();
+
+        // The camera's up has to be ORTHOGONALISED against the view before it goes into a
+        // Basis. Handing Basis(right, up, -forward) a up that is 63 degrees off forward builds
+        // a sheared frame - the projection is then skewed and the dataset lands off in a
+        // corner of the viewport instead of centred. set_camera_pose() does this internally for
+        // its callers; building the Transform3D by hand does not, so it is done here.
+        godot::Vector3 camera_up = up_axis - forward * up_axis.dot( forward );
+        camera_up = camera_up.length_squared() > 1e-12f
+                        ? camera_up.normalized()
+                        : reference.normalized();
+        // Godot's own convention, from set_camera_pose(): right = up x back, back = -forward.
+        const godot::Vector3 right = camera_up.cross( -forward ).normalized();
+
+        // Smallest distance at which every corner is inside both half-angles. For a corner at
+        // offset v from the target, its depth past the eye is (d + v.forward) and its offsets
+        // are v.right and v.up, so the binding corner gives d directly. No trigonometry to get
+        // wrong and no assumption that the box is axis aligned.
+        double distance = 0.0;
+        for ( int i = 0; i < 8; ++i )
+        {
+            const godot::Vector3 v = corners[i] - target;
+            const double depth = static_cast<double>( v.dot( forward ) );
+            distance = std::max( distance,
+                                 static_cast<double>( std::abs( v.dot( right ) ) ) / tan_half_h -
+                                     depth );
+            distance = std::max( distance,
+                                 static_cast<double>( std::abs( v.dot( camera_up ) ) ) / tan_half_v -
+                                     depth );
+        }
+        distance = std::max( distance, dataset_radius ) * kFramingMargin;
+        // The fit above can leave the eye inside the box on a dataset that is much wider than
+        // it is deep; one radius of clearance keeps the view outside the data.
+        distance = std::max( distance, dataset_radius * 1.05 );
+
+        const godot::Vector3 eye = target - forward * static_cast<float>( distance );
+        // Godot cameras look down their local -Z.
+        const godot::Basis basis( right, camera_up, -forward );
+        camera->set_global_transform( godot::Transform3D( basis, eye ) );
+        apply_framing_clip( camera );
+
+        // Once per load, in the editor and at runtime alike. This is the line that settles
+        // "why is the viewport empty": if it never appears the framing code did not run at
+        // all (stale extension binary, a Globe3D in the scene owns the camera, or
+        // auto_frame_on_load is off), and if it does, the numbers say where the camera went.
+        if ( framing_frames_ == 0 )
+        {
+            UtilityFunctions::print( godot::vformat(
+                "[Tileset3D] editor framing: cam=(%.1f, %.1f, %.1f) target=(%.1f, %.1f, %.1f) "
+                "dist=%.1f m radius=%.1f m up=(%.3f, %.3f, %.3f) tan_half_h=%.4f tan_half_v=%.4f "
+                "near=%.1f far=%.1f up_source=%s",
+                camera->get_global_position().x, camera->get_global_position().y,
+                camera->get_global_position().z, target.x, target.y, target.z, distance,
+                dataset_radius, camera_up.x, camera_up.y, camera_up.z, tan_half_h, tan_half_v,
+                static_cast<double>( camera->get_near() ),
+                static_cast<double>( camera->get_far() ),
+                dataset_up_axis.length_squared() < 1e-12f ? "geodetic" : "dataset_up_axis" ) );
+        }
+    }
+
+    godot::SubViewport *Tileset3D::editor_viewport() const
+    {
+#ifdef TILES3D_EDITOR_TARGET
+        // The guard matters now that frame_camera() is not editor-only and asks for this
+        // first: EditorInterface::get_singleton() outside the editor logs an engine error
+        // before it hands back null, and it ran once per re-applied framing frame.
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
+        {
+            return nullptr;
+        }
+        godot::EditorInterface *editor = godot::EditorInterface::get_singleton();
+        return editor != nullptr ? editor->get_editor_viewport_3d() : nullptr;
+#else
+        return nullptr;
+#endif
+    }
+
+    bool Tileset3D::dataset_box_corners( godot::Vector3 r_corners[8] ) const
+    {
+        if ( dataset_corners_valid_ )
+        {
+            const godot::Transform3D to_world = get_global_transform();
+            for ( int i = 0; i < 8; ++i )
+            {
+                r_corners[i] = to_world.xform( toGodotVector( dataset_corners_[i] ) );
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void Tileset3D::set_dataset_up_axis( const godot::Vector3 &p_value )
+    {
+        dataset_up_axis = p_value;
+    }
+
+    godot::Vector3 Tileset3D::get_dataset_up_axis() const
+    {
+        return dataset_up_axis;
+    }
+
+    godot::Camera3D *Tileset3D::resolve_framing_camera() const
+    {
+        if ( godot::Camera3D *editor_camera = resolve_editor_camera() )
+        {
+            return editor_camera;
+        }
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine == nullptr || engine->is_editor_hint() )
+        {
+            // In the editor the free camera is the only one on offer, and resolve_editor_camera
+            // has already had its say about it.
+            return nullptr;
+        }
+        // At runtime, the scene's own camera - unless a Globe3D owns it, which is the same
+        // rule the editor path follows.
+        godot::Node *scene_root = const_cast<Tileset3D *>( this );
         while ( scene_root->get_parent() != nullptr )
         {
             scene_root = scene_root->get_parent();
         }
         if ( has_globe_in_scene( scene_root ) )
         {
-            return;
+            return nullptr;
         }
+        godot::Viewport *viewport = get_viewport();
+        return viewport != nullptr ? viewport->get_camera_3d() : nullptr;
+    }
 
-        godot::EditorInterface *editor = godot::EditorInterface::get_singleton();
-        if ( editor == nullptr )
+    godot::Camera3D *Tileset3D::resolve_editor_camera() const
+    {
+#ifdef TILES3D_EDITOR_TARGET
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
         {
-            return;
+            return nullptr;
         }
-        godot::SubViewport *viewport = editor->get_editor_viewport_3d();
-        if ( viewport == nullptr )
+        // A Globe3D in the same scene owns the editor camera; see has_globe_in_scene().
+        godot::Node *scene_root = const_cast<Tileset3D *>( this );
+        while ( scene_root->get_parent() != nullptr )
         {
-            return;
+            scene_root = scene_root->get_parent();
         }
-        godot::Camera3D *camera = viewport->get_camera_3d();
-        if ( camera == nullptr )
+        if ( has_globe_in_scene( scene_root ) )
         {
-            return;
+            return nullptr;
         }
-
-        const godot::Vector3 target = get_global_transform().origin;
-        const double fov = static_cast<double>( camera->get_fov() );
-        constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-        const double distance = ( dataset_radius / std::tan( ( fov * kDegToRad ) / 2.0 ) ) * 1.2;
-
-        const godot::Vector3 eye =
-            target + godot::Vector3( 0.0f, static_cast<float>( distance * 0.4f ),
-                                    static_cast<float>( distance ) );
-        const godot::Vector3 forward = ( target - eye ).normalized();
-        const godot::Vector3 worldUp( 0.0f, 1.0f, 0.0f );
-        const godot::Vector3 right = worldUp.cross( forward ).normalized();
-        const godot::Vector3 up = forward.cross( right ).normalized();
-        // Godot cameras look down their local -Z.
-        const godot::Basis basis( right, up, -forward );
-        camera->set_global_transform( godot::Transform3D( basis, eye ) );
+        godot::SubViewport *viewport = editor_viewport();
+        return viewport != nullptr ? viewport->get_camera_3d() : nullptr;
 #else
-        (void)0;
+        return nullptr;
 #endif
+    }
+
+    void Tileset3D::assert_editor_clip( godot::Camera3D *p_camera )
+    {
+        if ( p_camera == nullptr || !manage_editor_clip || !is_inside_tree() )
+        {
+            return;
+        }
+        godot::Engine *engine = godot::Engine::get_singleton();
+        if ( engine == nullptr || !engine->is_editor_hint() )
+        {
+            return;
+        }
+        apply_framing_clip( p_camera );
+    }
+
+    void Tileset3D::apply_framing_clip( godot::Camera3D *p_camera )
+    {
+        if ( p_camera == nullptr || dataset_radius <= 0.0 )
+        {
+            return;
+        }
+        const godot::Vector3 center_world =
+            get_global_transform().xform( toGodotVector( dataset_center_ ) );
+        const double center_distance = std::max(
+            1.0, static_cast<double>( ( center_world - p_camera->get_global_position() ).length() ) );
+
+        // Same shape as GlobeTileLayer::assert_editor_clip, with the dataset in place of the
+        // planet: near grows with the distance so the depth ratio stays usable, and far has to
+        // clear the far side of the bounding sphere rather than a multiple of the distance,
+        // because a dataset framed from its own centre distance sits well inside that.
+        p_camera->set_near(
+            static_cast<float>( std::clamp( center_distance * 1e-4, 1.0, 1.0e6 ) ) );
+        p_camera->set_far( static_cast<float>(
+            std::max( center_distance * 4.0, center_distance + 3.0 * dataset_radius ) ) );
+    }
+
+    void Tileset3D::_on_frame_pre_draw()
+    {
+        assert_editor_clip( resolve_editor_camera() );
+    }
+
+    void Tileset3D::disconnect_pre_draw()
+    {
+        if ( !pre_draw_connected_ )
+        {
+            return;
+        }
+        pre_draw_connected_ = false;
+
+        godot::RenderingServer *rs = godot::RenderingServer::get_singleton();
+        if ( rs == nullptr )
+        {
+            // Already tearing down; the server drops its own connections with it.
+            return;
+        }
+        const godot::Callable callable( this, "_on_frame_pre_draw" );
+        if ( rs->is_connected( "frame_pre_draw", callable ) )
+        {
+            rs->disconnect( "frame_pre_draw", callable );
+        }
     }
 
     void Tileset3D::clear_loaded()
@@ -996,8 +1331,13 @@ namespace tiles3d
         frame_number = 0;
         last_rendered_count = 0;
         dataset_radius = 0.0;
+        dataset_center_ = math::Vec3( 0.0 );
+        dataset_corners_valid_ = false;
         loaded_bytes = 0;
         needs_framing = false;
+        framing_frames_ = 0;
+        tiles_rendered_once_ = false;
+        framing_released_emitted_ = false;
         model_matrix_.reset();
     }
 
@@ -1103,6 +1443,17 @@ namespace tiles3d
         placed_by_georeference = find_georeference() != nullptr;
         const math::Mat4 model = compute_model_matrix();
 
+        // The dataset centre, measured BEFORE the region conversion below rewrites the root
+        // volume, because which composition puts it in the render frame depends on the form
+        // the root declared: a region is absolute and only goes through the model matrix,
+        // while anything else goes through the tile transform chain as well.
+        const bool root_is_region =
+            root->boundingVolume.has_value() &&
+            root->boundingVolume->type == math::BoundingVolume::Type::Region;
+        const math::Vec3 root_center_raw =
+            root->boundingVolume.has_value() ? math::boundingVolumeCenter( *root->boundingVolume )
+                                              : math::Vec3( 0.0 );
+
         // Regions are EPSG:4979 absolute coordinates and do not follow the transform chain,
         // so they are rewritten into the tile local frame once, here.
         core::convertRegionBoundingVolumes( *root, model, model );
@@ -1112,9 +1463,72 @@ namespace tiles3d
                             ? math::boundingVolumeRadius( *root->boundingVolume )
                             : 0.0;
 
+        // And the point it is fitted around, in this node's local space. The traversal starts
+        // from the render frame and applies the root's own transform under it, so that is the
+        // composition the tiles really land in - which is NOT this node's origin whenever the
+        // implicit frame leaves the content in the tileset's own coordinates.
+        dataset_center_ =
+            root_is_region ? math::transformPoint( model, root_center_raw )
+                           : math::transformPoint( math::multiply( model, root->transform ),
+                                                    root_center_raw );
+
+        // The same composition for the eight corners, which is what the editor framing
+        // actually fits: a sphere of the root's radius is not a bound on a box, because a
+        // cube inscribed in it has corners sqrt(3) further out than the sphere.
+        dataset_corners_valid_ = false;
+        if ( root->boundingVolume.has_value() )
+        {
+            const math::BoundingVolume &volume = *root->boundingVolume;
+            math::Vec3 axes[3] = { math::Vec3( 0.0 ), math::Vec3( 0.0 ), math::Vec3( 0.0 ) };
+            double sphere_radius = 0.0;
+            if ( volume.type == math::BoundingVolume::Type::Box )
+            {
+                for ( int i = 0; i < 3; ++i )
+                {
+                    axes[i] = volume.boxHalfAxis( i ) * debug_bounding_volume_scale;
+                }
+            }
+            else if ( volume.type == math::BoundingVolume::Type::Sphere ||
+                      volume.type == math::BoundingVolume::Type::Region )
+            {
+                sphere_radius = math::boundingVolumeRadius( volume ) * debug_bounding_volume_scale;
+            }
+            if ( volume.type == math::BoundingVolume::Type::Box || sphere_radius > 0.0 )
+            {
+                const math::Mat4 to_render = root_is_region
+                                                 ? model
+                                                 : math::multiply( model, root->transform );
+                for ( int index = 0; index < 8; ++index )
+                {
+                    math::Vec3 corner = root_center_raw;
+                    if ( sphere_radius > 0.0 )
+                    {
+                        corner += math::Vec3( ( index & 1 ) != 0 ? sphere_radius : -sphere_radius,
+                                              ( index & 2 ) != 0 ? sphere_radius : -sphere_radius,
+                                              ( index & 4 ) != 0 ? sphere_radius : -sphere_radius );
+                    }
+                    else
+                    {
+                        corner += axes[0] * ( ( index & 1 ) != 0 ? 1.0 : -1.0 ) +
+                                  axes[1] * ( ( index & 2 ) != 0 ? 1.0 : -1.0 ) +
+                                  axes[2] * ( ( index & 4 ) != 0 ? 1.0 : -1.0 );
+                    }
+                    dataset_corners_[static_cast<std::size_t>( index )] =
+                        math::transformPoint( to_render, corner );
+                }
+                dataset_corners_valid_ = true;
+            }
+        }
+
         // Flag the editor to frame the dataset once it has loaded (editor only).
-        needs_framing = auto_frame_on_load && godot::Engine::get_singleton() != nullptr &&
-                        godot::Engine::get_singleton()->is_editor_hint();
+        // Not editor-only: a single-dataset scene has no camera of its own until the author
+        // adds one, and update_tiles() refuses to request anything without a camera to rank
+        // against, so the same opening pose is what makes such a scene run at all. Scenes with
+        // a georeference or a globe are left alone further down.
+        needs_framing = auto_frame_on_load;
+        framing_frames_ = 0;
+        tiles_rendered_once_ = false;
+        framing_released_emitted_ = false;
 
         count_tiles();
         build_debug_mesh();
@@ -1134,6 +1548,17 @@ namespace tiles3d
             "georeferenced=%s",
             path, asset_version, static_cast<int>( tile_count ), maximum_depth, root_geometric_error,
             upAxisName, placed_by_georeference ? "yes" : "no (origin-centred fallback)" ) );
+
+        // The local centre is what frame_camera() aims at and what assert_editor_clip() brackets,
+        // and it is the one number that says whether the two agree with the node: a dataset
+        // whose implicit frame leaves it in its own coordinates sits millions of metres from
+        // this node's origin, and every "why is the editor viewport empty" question ends here.
+        UtilityFunctions::print( godot::vformat(
+            "[Tileset3D] render-frame centre: local=(%.1f, %.1f, %.1f) radius=%.1f m "
+            "node_origin=(%.1f, %.1f, %.1f)",
+            dataset_center_.x, dataset_center_.y, dataset_center_.z, dataset_radius,
+            get_global_transform().origin.x, get_global_transform().origin.y,
+            get_global_transform().origin.z ) );
 
         report_georeference();
 
@@ -1571,6 +1996,19 @@ namespace tiles3d
             return;
         }
 
+        // Park the wireframe's ORIGIN on the dataset instead of on this node, and move the
+        // vertices the opposite way. Under the implicit frame the two are millions of metres
+        // apart, and it is the origin the editor draws the selection gizmo at and the pivot
+        // the user drags - a wireframe you can see but not click, whose gizmo is somewhere
+        // off past the horizon, is the worst of both. Node-space offsets, so the node's own
+        // authored transform still places the whole thing.
+        const math::Vec3 origin_offset = dataset_center_;
+        for ( int i = 0; i < vertices.size(); ++i )
+        {
+            const godot::Vector3 shifted = vertices[i] - toGodotVector( origin_offset );
+            vertices[i] = shifted;
+        }
+
         Array arrays;
         arrays.resize( Mesh::ARRAY_MAX );
         arrays[Mesh::ARRAY_VERTEX] = vertices;
@@ -1587,11 +2025,22 @@ namespace tiles3d
         // what we want underneath them.
         material->set_flag( BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true );
 
+        // Rebuilds happen while the aid is on (see the caller in update_tiles), and the set of
+        // loaded tiles changes as the camera moves, so the previous wireframe has to go rather
+        // than accumulate as a stack of stale ones.
+        if ( debug_mesh != nullptr )
+        {
+            remove_child( debug_mesh );
+            memdelete( debug_mesh );
+            debug_mesh = nullptr;
+        }
+
         debug_mesh = memnew( MeshInstance3D );
         debug_mesh->set_name( "BoundingVolumeWireframe" );
         debug_mesh->set_mesh( mesh );
         debug_mesh->set_material_override( material );
         debug_mesh->set_visible( debug_show_bounding_volume );
+        debug_mesh->set_position( toGodotVector( origin_offset ) );
         add_child( debug_mesh );
     }
 
@@ -1633,6 +2082,11 @@ namespace tiles3d
     double Tileset3D::get_dataset_radius() const
     {
         return dataset_radius;
+    }
+
+    godot::Vector3 Tileset3D::get_dataset_center_local() const
+    {
+        return toGodotVector( dataset_center_ );
     }
 
     double Tileset3D::get_anchor_separation() const
@@ -2089,10 +2543,39 @@ namespace tiles3d
         }
 
         // Editor convenience: fly the camera to frame the dataset once after it loads.
+        // The wireframe draws the LOADED tiles (see collectTileEdges), and that set grows as
+        // the camera moves, so a mesh built once at load time would be frozen at "the root only".
+        // Rebuilt on a throttle: the walk now prunes at the first unloaded tile, so it costs
+        // what the loaded subtree costs and not what the whole tree costs.
+        if ( debug_show_bounding_volume && frame_number % kDebugMeshRefreshFrames == 0 )
+        {
+            build_debug_mesh();
+        }
+
         if ( needs_framing )
         {
+            // Re-applied for several frames, and held until something is actually on screen.
+            // A single write is not enough: the editor drives its own viewport camera, so the
+            // pose is gone again by the next navigation tick or viewport rebuild, and on the
+            // first frames there is nothing to see anyway because no tile has been submitted
+            // yet. GlobeTileLayer works the same way, for the same reason.
             frame_camera();
-            needs_framing = false;
+            ++framing_frames_;
+            const bool hold_until_loaded = !tiles_rendered_once_ && framing_frames_ < kFramingFrameCap;
+            if ( framing_frames_ >= kFramingFrames && !hold_until_loaded )
+            {
+                needs_framing = false;
+            }
+        }
+
+        // Once the camera has been released, and only once per load. A script that wants to
+        // take the view over has to be told, not left to guess from the frame count: polling
+        // the camera's distance works right up until the frame timing shifts by one, and then
+        // it reads the pose from before the framing ran.
+        if ( !needs_framing && dataset_radius > 0.0 && !framing_released_emitted_ )
+        {
+            framing_released_emitted_ = true;
+            emit_signal( "framing_released" );
         }
 
         ++frame_number;
@@ -2125,6 +2608,10 @@ namespace tiles3d
         sync_content_visibility();
 
         last_rendered_count = render_list.size();
+        if ( last_rendered_count > 0 )
+        {
+            tiles_rendered_once_ = true;
+        }
 
         // LOD diagnostic. Fires when the selected set changes, plus at most once every
         // kReportInterval frames so a parked camera does not flood the output.

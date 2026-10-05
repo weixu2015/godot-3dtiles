@@ -21,13 +21,16 @@
 #include "core/tiles/Tile.h"
 #include "core/tiles/TilesetJson.h"
 
+#include "godot_cpp/classes/camera3d.hpp"
 #include "godot_cpp/classes/http_client.hpp"
 #include "godot_cpp/classes/mesh_instance3d.hpp"
 #include "godot_cpp/classes/node3d.hpp"
 #include "godot_cpp/classes/ref.hpp"
+#include "godot_cpp/classes/sub_viewport.hpp"
 #include "godot_cpp/variant/string.hpp"
 #include "godot_cpp/variant/vector3.hpp"
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <vector>
@@ -94,6 +97,38 @@ namespace tiles3d
         /// web "flyTo" behaviour; only acts in the editor.
         bool auto_frame_on_load = true;
 
+        /// Editor-only: keep the editor camera's near/far around the dataset, every frame.
+        /// The editor writes its own clip planes during navigation (0.1/4000), which is fine
+        /// for a scene measured in metres and clips away a dataset framed from kilometres
+        /// away - and because this node may be the only thing in the scene, there is no
+        /// globe layer to do it the way GlobeTileLayer::manage_editor_clip does.
+        bool manage_editor_clip = true;
+
+        /// True while connected to RenderingServer::frame_pre_draw; see assert_editor_clip.
+        bool pre_draw_connected_ = false;
+
+        /// How many frames the editor framing pose has been re-applied for, and whether any
+        /// tile has been submitted yet. See the kFramingFrames note in the .cpp.
+        int framing_frames_ = 0;
+        bool tiles_rendered_once_ = false;
+
+        /// One-shot latch for framing_released(), reset on every load.
+        bool framing_released_emitted_ = false;
+
+        /// The dataset's own up, as a direction in this node's local space, used only to
+        /// orient the editor's opening view. (0, 0, 0) means "work it out": the geodetic up
+        /// when the implicit frame left the content in ECEF, and +Y otherwise. A dataset
+        /// authored in some other space sets this instead. It cannot move content - it only
+        /// ever steers a camera - so unlike the placement rules it may fall back on a
+        /// measurement of the coordinate magnitude.
+        godot::Vector3 dataset_up_axis = godot::Vector3( 0.0f, 0.0f, 0.0f );
+
+        /// The root bounding volume's eight corners in this node's local space, cached with
+        /// dataset_center_ for the same reason. Framing a sphere of the same radius is not
+        /// enough: a cube inscribed in it has corners sqrt(3) further out.
+        std::array<math::Vec3, 8> dataset_corners_{};
+        bool dataset_corners_valid_ = false;
+
         std::unique_ptr<core::Tile> root;
         godot::String asset_version;
         double root_geometric_error = 0.0;
@@ -124,6 +159,13 @@ namespace tiles3d
 
         /// Bounding-sphere radius of the whole dataset, used for camera framing.
         double dataset_radius = 0.0;
+        /// Centre of the whole dataset in this node's own local space, i.e. already through
+        /// `compute_model_matrix()`. NOT the node origin: with the implicit per-tileset frame
+        /// the content stays where the tileset authored it, and for a dataset whose root is a
+        /// `sphere` on the ellipsoid with no `transform` that is true ECEF, some 4.6e6 m from
+        /// the node. Cached with the radius because the region conversion has already run by
+        /// the time either can be measured.
+        math::Vec3 dataset_center_ = math::Vec3( 0.0 );
         // Filled by report_georeference() from the root transform; see the getters above.
         double dataset_longitude_ = 0.0;
         double dataset_latitude_ = 0.0;
@@ -322,6 +364,42 @@ namespace tiles3d
         /// Editor-only: flies the editor camera to frame the loaded dataset once.
         void frame_camera();
 
+        /// Editor-only: the editor's 3D viewport camera, or null outside the editor, when it
+        /// is one this node may drive (see has_globe_in_scene: a Globe3D in the same scene
+        /// owns the camera instead).
+        godot::Camera3D *resolve_editor_camera() const;
+
+        /// The camera automatic framing is allowed to move, or null when there is none this
+        /// node should touch: the editor's free camera while editing, otherwise the scene's
+        /// own camera at runtime - and null whenever a Globe3D owns the camera, or when
+        /// auto_frame_on_load is off.
+        godot::Camera3D *resolve_framing_camera() const;
+
+        /// Clip planes that bracket the dataset, from wherever the camera is. Not editor-only:
+        /// a runtime camera framed onto a dataset 6.4e6 m from the world origin needs the
+        /// same treatment as the editor's.
+        void apply_framing_clip( godot::Camera3D *p_camera );
+
+        /// Editor-only: the editor's 3D viewport, or null outside the editor.
+        godot::SubViewport *editor_viewport() const;
+
+        /// The dataset's bounding box corners in world space; false when nothing is loaded.
+        bool dataset_box_corners( godot::Vector3 r_corners[8] ) const;
+
+        void set_dataset_up_axis( const godot::Vector3 &p_value );
+        godot::Vector3 get_dataset_up_axis() const;
+
+        /// Editor-only: keeps the editor camera's clip planes around the dataset. The editor
+        /// writes its own near/far during navigation, so a single write from the load frame
+        /// does not survive; this runs from RenderingServer::frame_pre_draw instead, which is
+        /// the last point before the frame is drawn.
+        void assert_editor_clip( godot::Camera3D *p_camera );
+
+        /// Bound so the RenderingServer frame_pre_draw Callable can resolve it by name.
+        void _on_frame_pre_draw();
+
+        void disconnect_pre_draw();
+
         /// Validates the node-tree rules (single implicit tileset vs shared georeference,
         /// no nesting). Returns true when the configuration is allowed to load.
         bool configuration_is_valid() const;
@@ -381,6 +459,8 @@ namespace tiles3d
         /// Fly the editor camera to frame the dataset once after it loads (editor only).
         void set_auto_frame_on_load( bool p_value );
         bool get_auto_frame_on_load() const;
+        void set_manage_editor_clip( bool p_value );
+        bool get_manage_editor_clip() const;
 
         /// Colour the debug wireframe by tile depth; a single colour is used when false.
         void set_debug_colorize_tiles( bool p_value );
@@ -426,6 +506,8 @@ namespace tiles3d
         double get_dataset_height() const;
         /// Bounding sphere radius of the dataset, metres. 0 before load.
         double get_dataset_radius() const;
+        /// Dataset centre in this node's local space, for scripts that orbit around it.
+        godot::Vector3 get_dataset_center_local() const;
         /// Distance from the Georeference3D anchor to the dataset centre, metres. -1 when
         /// there is no Georeference3D.
         double get_anchor_separation() const;

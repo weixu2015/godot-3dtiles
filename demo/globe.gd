@@ -66,11 +66,6 @@ const DATASETS := [
 		"sse": 16.0,
 	},
 	{
-		"label": "test",
-		"url": "E:/GISData/3D Tiles/test/tileset.json",
-		"sse": 16.0,
-	},
-	{
 		"label": "Icospheres",
 		"url": "E:/GISData/3D Tiles/Icospheres/tileset.json",
 		"sse": 16.0,
@@ -81,7 +76,7 @@ const DATASETS := [
 		"sse": 16.0,
 	},
 	{
-		"label": "Aerometrex SanFrancisco 2cm (known corrupt: deep tree missing)",
+		"label": "Aerometrex SanFrancisco 2cm",
 		"url": "E:/GISData/3D Tiles/Aerometrex-SanFrancisco-2cm/tileset.json",
 		"sse": 4.0,
 		# The mesh is authored on the NAVD88 orthometric datum (sea level), which in San
