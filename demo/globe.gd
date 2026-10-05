@@ -23,8 +23,12 @@ extends Node3D
 @export var start_latitude_degrees: float = 25.0
 @export var start_distance: float = 16000000.0
 
-# Seconds a Home flight takes.
-@export var home_flight_seconds: float = 1.4
+# Seconds a Home flight takes. 0 = the camera's automatic rule (Cesium's: one second per
+# million metres of straight-line travel plus two, capped at three) - a cross-planet switch
+# gets 3 s, a nearby dataset proportionally less. A fixed value here is what made the switch
+# read as a mid-flight camera jump: the QUINTIC_IN_OUT easing compresses most of the motion
+# into the middle 20% of the flight, and 1.4 s turned that middle into a quarter of a second.
+@export var home_flight_seconds: float = 0.0
 
 const EARTH_SEMI_MAJOR_AXIS := 6378137.0
 

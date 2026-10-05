@@ -105,6 +105,22 @@ namespace tiles3d
         /// Globe3D defaults to 1.06 radii, so 1.2 has room to spare.
         constexpr double kAtmosphereHeadroom = 1.2;
 
+        /// Port of Cesium's CameraFlightPath power-8 height curve: how sharply the height
+        /// bulges towards the cruise altitude between the two endpoints. Cesium raises the
+        /// endpoint offsets to the 1/8 power so the curve spends most of the middle of the
+        /// flight near the ceiling - the "fly up, cruise over, fly down" read.
+        constexpr double kFlyHeightPower = 8.0;
+        constexpr double kFlyHeightFactor = 1.0e6;
+
+        /// Cesium's automatic cruise altitude scales the frustum-fit distance of the
+        /// start->end span by this factor (CameraFlightPath.js createHeightFunction).
+        constexpr double kFlyAltitudeFitScale = 0.2;
+
+        /// Cesium's easing rule (CameraFlightPath.js createTween): a flight that starts
+        /// higher than it ends, from above this height, decelerates out (CUBIC_OUT);
+        /// everything else eases in-out (QUINTIC_IN_OUT). Both have zero end velocity.
+        constexpr double kFlyCubicOutMinStartHeight = 11500.0;
+
         /// Below this the camera is already sitting on the frame origin and a shift would be a
         /// no-op. Without it the threshold-0 ("every frame") mode would rebuild the globe
         /// surface sixty times a second for a parked camera, moving the origin by nothing.
@@ -268,9 +284,9 @@ namespace tiles3d
             D_METHOD( "set_camera_pose", "p_position", "p_direction", "p_up" ),
             &GlobeCameraController::set_camera_pose );
         ClassDB::bind_method( D_METHOD( "fly_to", "p_longitude_degrees", "p_latitude_degrees",
-                                        "p_distance", "p_seconds" ),
+                                        "p_distance", "p_seconds", "p_ceiling_metres" ),
                               &GlobeCameraController::fly_to,
-                              DEFVAL( 1.2 ) );
+                              DEFVAL( 1.2 ), DEFVAL( -1.0 ) );
         ClassDB::bind_method( D_METHOD( "is_flying" ), &GlobeCameraController::is_flying );
         ClassDB::bind_method( D_METHOD( "get_camera_direction" ),
                               &GlobeCameraController::get_camera_direction );
@@ -1699,9 +1715,9 @@ namespace tiles3d
 
     void GlobeCameraController::fly_to( const double p_longitude_degrees,
                                        const double p_latitude_degrees, const double p_distance,
-                                       const double p_seconds )
+                                       const double p_seconds, const double p_ceiling_metres )
     {
-        if ( p_seconds <= 0.0 )
+        if ( p_seconds < 0.0 )
         {
             orbit_to( p_longitude_degrees, p_latitude_degrees, p_distance );
             return;
@@ -1736,7 +1752,113 @@ namespace tiles3d
         fly_end_distance_ = clampd( p_distance, surface_distance + kMinCameraHeight,
                                     max_distance() );
         fly_elapsed_ = 0.0;
-        fly_duration_ = p_seconds;
+        // Duration. `seconds == 0` asks for Cesium's automatic rule: one second per million
+        // metres of straight-line travel, plus two, capped at three. This is not a cosmetic
+        // default - with the QUINTIC_IN_OUT easing the eased progress runs from 0.1 to 0.9
+        // inside the middle 20% of the flight, so a cross-planet hop on a 1.4 s budget
+        // compresses most of the climb, the turn and the descent into a quarter of a second,
+        // which reads as a camera jump. Three seconds is what Cesium flies the same route
+        // with, and the short-hop lerp case still reads fine on it.
+        double seconds = p_seconds;
+        if ( seconds <= 0.0 )
+        {
+            const Vector3 end_position_snap =
+                pivot + fly_end_direction_ * static_cast<float>( fly_end_distance_ );
+            const double chord =
+                static_cast<double>( ( get_position() - end_position_snap ).length() );
+            seconds = std::min( std::ceil( chord / 1.0e6 ) + 2.0, 3.0 );
+        }
+        fly_duration_ = seconds;
+
+        // Heights, not centre distances: the height curve is measured against the ground the
+        // camera flies over (Cesium's cartographic height), so each endpoint is referenced to
+        // the surface radius under its own direction.
+        const double start_radius = surface_radius_along( fly_start_direction_ );
+        const double end_radius = surface_radius_along( fly_end_direction_ );
+        fly_start_height_ = fly_start_distance_ - start_radius;
+        fly_end_height_ = fly_end_distance_ - end_radius;
+
+        // Cruise altitude. A ceiling asked for explicitly is converted to a height and never
+        // refused (Cesium's maximumHeight); otherwise Cesium's rule: the start->end span is
+        // projected onto the camera's up/right axes and the frustum is asked how far away it
+        // would have to sit for that span to fit the view, scaled by 0.2. For a hop across
+        // the planet that lands around 2000 km - the span, not the Earth radius, sets it.
+        double altitude = -1.0;
+        if ( p_ceiling_metres > 0.0 )
+        {
+            altitude = p_ceiling_metres - math::kWgs84MeanRadius;
+        }
+        else
+        {
+            const Vector3 end_position =
+                pivot + fly_end_direction_ * static_cast<float>( fly_end_distance_ );
+            const Vector3 diff = get_position() - end_position;
+
+            // The pose update_fly() will produce: looking at the pivot, world up, degenerate
+            // only at the poles (same rule as the look_at below).
+            Vector3 forward = pivot - get_position();
+            if ( forward.length_squared() > 0.0f )
+            {
+                forward.normalize();
+            }
+            Vector3 up_world( 0.0f, 1.0f, 0.0f );
+            if ( std::abs( forward.y ) > 0.99f )
+            {
+                up_world = Vector3( 0.0f, 0.0f, 1.0f );
+            }
+            const Vector3 right_world = forward.cross( up_world ).normalized();
+
+            const double vertical_distance =
+                static_cast<double>( std::abs( diff.dot( up_world ) ) );
+            const double horizontal_distance =
+                static_cast<double>( std::abs( diff.dot( right_world ) ) );
+
+            const double fov_radians = get_fov() * ( math::kPi / 180.0 );
+            const godot::Viewport *viewport = get_viewport();
+            double aspect = 0.0;
+            if ( viewport != nullptr )
+            {
+                const Vector2 size = viewport->get_visible_rect().size;
+                if ( size.y > 0.0f )
+                {
+                    aspect = static_cast<double>( size.x ) / static_cast<double>( size.y );
+                }
+            }
+            double fit = 0.0;
+            if ( fov_radians > 1e-4 && aspect > 1e-4 )
+            {
+                // getAltitude(): the near factors cancel, leaving the span over the tangent
+                // of the half fov. Cesium passes the vertical span in the horizontal slot and
+                // vice versa - ported verbatim.
+                const double tan_theta = std::tan( 0.5 * fov_radians );
+                fit = std::max( vertical_distance / ( aspect * tan_theta ),
+                                horizontal_distance / tan_theta );
+            }
+            else
+            {
+                fit = std::max( vertical_distance, horizontal_distance );
+            }
+            altitude = std::min( kFlyAltitudeFitScale * fit, 1.0e9 );
+        }
+
+        // Cesium's branch: only a cruise altitude ABOVE both endpoint heights produces the
+        // bulge; otherwise the height just lerps, which is exactly the old direct flight.
+        fly_altitude_ = -1.0;
+        const double max_endpoint_height = std::max( fly_start_height_, fly_end_height_ );
+        if ( altitude > max_endpoint_height )
+        {
+            fly_altitude_ = altitude;
+            fly_height_s_ = -std::pow( ( altitude - fly_start_height_ ) * kFlyHeightFactor,
+                                       1.0 / kFlyHeightPower );
+            fly_height_e_ = std::pow( ( altitude - fly_end_height_ ) * kFlyHeightFactor,
+                                      1.0 / kFlyHeightPower );
+        }
+
+        fly_easing_ = ( fly_start_height_ > fly_end_height_ &&
+                        fly_start_height_ > kFlyCubicOutMinStartHeight )
+                          ? 1
+                          : 0;
+
         fly_active_ = true;
 
         // A flight owns the camera while it runs.
@@ -1749,6 +1871,39 @@ namespace tiles3d
         return fly_active_;
     }
 
+    double GlobeCameraController::surface_radius_along( const Vector3 &p_direction_parent ) const
+    {
+        // A ray from the ellipsoid centre along a Y-up ECEF direction (x, y, z) touches the
+        // WGS84 surface at t = 1 / sqrt((dx^2 + dz^2) / a^2 + dy^2 / b^2) with the direction
+        // normalized - the axis-aligned ellipsoid intersection, no longitude/latitude needed.
+        // The direction arrives in the camera's parent space, so it goes through the frame
+        // first (rigid transform: a point and its converted pivot differ by exactly the
+        // rotated direction).
+        const Vector3 pivot = resolve_pivot();
+        const Vector3 tip_parent = pivot + p_direction_parent;
+        const Vector3 tip_local = frame_point_from_parent( tip_parent );
+        const Vector3 pivot_local = frame_point_from_parent( pivot );
+        Vector3 direction = tip_local - pivot_local;
+        const double length = static_cast<double>( direction.length() );
+        if ( length < 1e-9 )
+        {
+            return math::kWgs84MeanRadius;
+        }
+        direction /= static_cast<float>( length );
+
+        const double a = math::kWgs84SemiMajorAxis;
+        const double b = math::kWgs84SemiMinorAxis;
+        const double equatorial = static_cast<double>( direction.x ) * direction.x +
+                                  static_cast<double>( direction.z ) * direction.z;
+        const double polar = static_cast<double>( direction.y ) * direction.y;
+        const double scaled = equatorial / ( a * a ) + polar / ( b * b );
+        if ( scaled < 1e-18 )
+        {
+            return math::kWgs84MeanRadius;
+        }
+        return 1.0 / std::sqrt( scaled );
+    }
+
     void GlobeCameraController::update_fly( const double p_delta )
     {
         if ( !fly_active_ )
@@ -1758,17 +1913,56 @@ namespace tiles3d
 
         fly_elapsed_ += p_delta;
         const double t = clampd( fly_elapsed_ / std::max( fly_duration_, 1e-3 ), 0.0, 1.0 );
-        // Smoothstep: zero velocity at both ends, so the flight does not start or stop with a
-        // jerk the way a linear interpolation does.
-        const double ease = t * t * ( 3.0 - 2.0 * t );
 
+        // Cesium's easing selection (see the staging comment). Both curves have zero
+        // velocity at the ends, so the flight does not start or stop with a jerk.
+        double ease = 0.0;
+        if ( fly_easing_ == 1 )
+        {
+            // CUBIC_OUT: 1 - (1 - t)^3.
+            const double inverse = 1.0 - t;
+            ease = 1.0 - inverse * inverse * inverse;
+        }
+        else
+        {
+            // QUINTIC_IN_OUT: 16 t^5 for the first half, mirrored for the second.
+            if ( t < 0.5 )
+            {
+                const double x = t * t * t * t * t;
+                ease = 16.0 * x;
+            }
+            else
+            {
+                const double inverse = -2.0 * t + 2.0;
+                ease = 1.0 - ( inverse * inverse * inverse * inverse * inverse ) * 0.5;
+            }
+        }
+
+        // The route: Cesium lerps longitude/latitude; the spherical equivalent is a slerp of
+        // the direction from the ellipsoid centre.
         const Vector3 direction =
             slerp_direction( fly_start_direction_, fly_end_direction_, ease );
-        // Log-space distance: the same easing then reads as a constant zoom rate whether the
-        // flight spans a hundred metres or ten thousand kilometres.
-        const double distance = std::exp(
-            std::log( fly_start_distance_ ) +
-            ( std::log( fly_end_distance_ ) - std::log( fly_start_distance_ ) ) * ease );
+
+        // The height: a power-8 bulge towards the cruise altitude when there is one (the flat
+        // top of x^8 is the "cruise"), a plain lerp otherwise. x moves linearly in eased time
+        // from fly_height_s_ (< 0) to fly_height_e_ (> 0), crossing zero at the ceiling.
+        double height = 0.0;
+        if ( fly_altitude_ > 0.0 )
+        {
+            const double x = fly_height_s_ + ( fly_height_e_ - fly_height_s_ ) * ease;
+            height = fly_altitude_ - std::pow( x, kFlyHeightPower ) / kFlyHeightFactor;
+        }
+        else
+        {
+            height = fly_start_height_ +
+                     ( fly_end_height_ - fly_start_height_ ) * ease;
+        }
+
+        // Centre distance = the surface radius under the direction the camera is over now
+        // plus the height above it. The endpoints reproduce start/end distances exactly (the
+        // heights were defined by subtracting those radii), and in between the radius follows
+        // the ellipsoid's latitude variation the way Cesium's fromRadians(lon, lat, h) does.
+        const double distance = surface_radius_along( direction ) + height;
 
         const Vector3 pivot = resolve_pivot();
         set_position( pivot + direction * static_cast<float>( distance ) );
@@ -1777,11 +1971,17 @@ namespace tiles3d
         // Keep looking at the pivot; the up vector degenerates at the poles.
         const godot::Node3D *parent_3d = Object::cast_to<godot::Node3D>( get_parent() );
         const Vector3 world_pivot = parent_3d != nullptr ? parent_3d->to_global( pivot ) : pivot;
-        Vector3 up( 0.0f, 1.0f, 0.0f );
-        if ( std::abs( direction.y ) > 0.99f )
+        // Keep looking at the pivot. The up vector is world Y orthogonalised against the
+        // view direction, which varies CONTINUOUSLY along the route - the previous hard
+        // switch on |direction.y| > 0.99 snapped the roll the moment a flight crossed a
+        // latitude of about 82 degrees, which read exactly as a mid-flight camera jump.
+        Vector3 up = Vector3( 0.0f, 1.0f, 0.0f ) - direction * direction.y;
+        if ( up.length_squared() < 1e-6f )
         {
-            up = Vector3( 0.0f, 0.0f, 1.0f );
+            // At (or within a whisker of) a pole: fall back to world Z, same rule as before.
+            up = Vector3( 0.0f, 0.0f, 1.0f ) - direction * direction.z;
         }
+        up = up.normalized();
         look_at( world_pivot, up );
 
         if ( t >= 1.0 )

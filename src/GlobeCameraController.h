@@ -97,10 +97,15 @@ namespace tiles3d
         void orbit_to( double p_longitude_degrees, double p_latitude_degrees, double p_distance );
 
         /// Same target as orbit_to(), but flown to over `seconds` instead of snapped: the
-        /// direction is slerped and the distance eased in log space, so a flight across five
-        /// orders of magnitude looks even. `seconds <= 0` falls back to a snap.
+        /// route is a slerp and the height follows Cesium camera.flyTo's curve - a power-8
+        /// bulge towards a frustum-derived cruise altitude for long hops, a plain lerp for
+        /// short ones. `seconds == 0` uses Cesium's automatic duration (one second per
+        /// million metres of travel plus two, capped at three); `seconds < 0` falls back to
+        /// a snap.
+        /// `p_ceiling_metres > 0` forces that centre distance as the cruise altitude (Cesium's
+        /// `maximumHeight`); <= 0 derives it from the camera frustum exactly like Cesium.
         void fly_to( double p_longitude_degrees, double p_latitude_degrees, double p_distance,
-                     double p_seconds = 1.2 );
+                     double p_seconds = 1.2, double p_ceiling_metres = -1.0 );
 
         /// True while a fly_to() is in progress. Any user input cancels it.
         bool is_flying() const;
@@ -324,13 +329,50 @@ namespace tiles3d
 
         // Fly-to state. Directions are unit vectors in the camera's parent space, the same
         // space resolve_pivot() works in.
+        //
+        // The flight is a straight port of Cesium's camera.flyTo (CameraFlightPath.js,
+        // createUpdate3D + createHeightFunction), re-expressed in the trackball's "direction
+        // from the ellipsoid centre + centre distance" parametrization. Cesium does NOT have
+        // climb/cruise/descend phases and does NOT pick a fixed fraction of the Earth radius:
+        //
+        //   route     the longitude/latitude lerp of Cesium becomes a slerp of the direction,
+        //             driven by the same single eased progress value;
+        //   height    a continuous function of that progress. When the automatic cruise
+        //             altitude (derived from the camera frustum fitting the start->end span,
+        //             times Cesium's 0.2 factor) exceeds both endpoint heights, the height
+        //             follows a power-8 curve that bulges from startHeight up to the cruise
+        //             altitude and back down to endHeight - the "fly up, cruise over, fly
+        //             down" read comes from the flat top of x^8, not from phases. When the
+        //             cruise altitude is below the endpoints the height is a plain lerp,
+        //             which is why short hops never read as a lift-off;
+        //   easing    Cesium's rule: descending from above 11.5 km is CUBIC_OUT, everything
+        //             else QUINTIC_IN_OUT (both have zero end velocity, like smoothstep).
+        //
+        // The centre distance is then re-derived per frame as the ellipsoid surface radius
+        // under the current direction plus that height, so the curve is measured against the
+        // ground the camera is actually flying over, not against the centre.
         bool fly_active_ = false;
         double fly_elapsed_ = 0.0;
         double fly_duration_ = 0.0;
         double fly_start_distance_ = 0.0;
         double fly_end_distance_ = 0.0;
+        double fly_start_height_ = 0.0;
+        double fly_end_height_ = 0.0;
+        /// Cruise altitude above the surface, metres. <= 0 means the height lerps between
+        /// the endpoint heights (no bulge).
+        double fly_altitude_ = -1.0;
+        /// Power-8 curve constants (see the definition); only meaningful when fly_altitude_ > 0.
+        double fly_height_s_ = 0.0;
+        double fly_height_e_ = 0.0;
+        /// 0 = QUINTIC_IN_OUT (Cesium's default), 1 = CUBIC_OUT (descending from high up).
+        int fly_easing_ = 0;
         godot::Vector3 fly_start_direction_;
         godot::Vector3 fly_end_direction_;
+
+        /// The ellipsoid surface radius under `p_direction_parent` (a parent-space unit
+        /// direction): where a ray from the ellipsoid centre along that direction touches
+        /// the WGS84 surface. Metres.
+        double surface_radius_along( const godot::Vector3 &p_direction_parent ) const;
 
         /// Closest the camera may get to the ellipsoid centre (just above the polar radius).
         static double min_distance();
