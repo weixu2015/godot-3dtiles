@@ -26,6 +26,7 @@ const EARTH_POLAR_RADIUS := 6356752.3142451793
 const START_DISTANCE := 14000000.0       # centres the whole globe in both panes
 const NET_ALTITUDE := 3000.0             # graticule hover height, clear of the surface
 const CUBE_SIZE := 4.0
+const CUBE_CLEARANCE := 0.75            # metres of daylight under the cube, see _build_probe_content
 const TRIANGLE_GAP := 30.0               # metres north of the cube, so the two never overlap
 const TRIANGLE_HALF := 6.0              # half width of each triangle, metres
 const TRIANGLE_GAP_INNER := 5.0         # the 1 m -> 5 m gap chapter 08 asks for, at this scale
@@ -266,10 +267,26 @@ func _build_probe_content(globe: Node3D, probe: Node3D) -> void:
 	var cube_material := StandardMaterial3D.new()
 	cube_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	cube_material.albedo_color = Color(1.0, 0.55, 0.1, 0.45)
-	cube_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	# PRECISION_OPAQUE=1 drops the translucency. Two faces of a closed box are always in
+	# the way, so a 45% alpha box renders as two alpha blends over the background and the
+	# two-blend colour is NOT the material colour - which makes the cube a poor thing to
+	# measure positions against, and puts a wedge of single-blend pixels in the picture
+	# wherever the exit face rasterises to less than a pixel.
+	if OS.get_environment("PRECISION_OPAQUE") != "":
+		cube_material.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		cube_material.albedo_color = Color(1.0, 0.55, 0.1, 1.0)
+	else:
+		cube_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	cube_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	cube.material_override = cube_material
-	cube.position = up * (CUBE_SIZE * 0.5)
+	# Lifted clear of the ground, and that clearance is not cosmetic. The probe sits on the
+	# ellipsoid and the globe surface is drawn from the same h = 0, so a cube whose BOTTOM face
+	# is also at h = 0 has that face coplanar with the ground. The cube is alpha blended and
+	# therefore does not write depth, so wherever the ground wins the depth test the cube's
+	# exit face is rejected and the pixel ends up with ONE blend instead of two - a grey
+	# wedge through the middle of the cube that reads as a shading artefact and is nothing
+	# of the sort. Half a metre of daylight is enough to separate the two surfaces.
+	cube.position = up * (CUBE_SIZE * 0.5 + CUBE_CLEARANCE)
 	probe.add_child(cube)
 
 	# The chapter-08 experiment: two coplanar triangles with a gap between them, plus a
