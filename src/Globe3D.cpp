@@ -945,7 +945,7 @@ namespace tiles3d
         }
 
         // The reference globe is a Y-up ECEF sphere: +Y is the north pole. The mesh is built
-        // in that space directly (docs/GLOBE_PLAN.md 3.3 - the surface never goes through the
+        // in that space directly (docs/ARCHITECTURE.md 3.6 - the surface never goes through the
         // ENU tangent plane), so Godot sees exactly what the reference draws.
         //
         // Vertex (i, j): i indexes longitude 0..radial_segments (wrapping), j indexes

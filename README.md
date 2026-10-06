@@ -1,39 +1,41 @@
 # godot-3dtiles
 
-A Godot 4.7 GDExtension that loads and renders [OGC 3D Tiles](https://github.com/CesiumGS/3d-tiles) directly — **no Cesium dependency**.
+A Godot 4.7 GDExtension that loads and renders [OGC 3D Tiles](https://github.com/CesiumGS/3d-tiles) directly — **no cesium-native dependency**.
 
 The plugin is a self-contained C++20 implementation: an engine-agnostic scheduling kernel plus a thin Godot layer. It reads `tileset.json`, walks the tile tree with screen-space-error refinement, fetches `b3dm` payloads, decodes Draco-compressed meshes and assembles them into Godot nodes.
 
-![Demo](screenshot.png)
+![Demo](screenshot.webp)
 
 ## Status
 
 Working end to end: photogrammetry tilesets (`b3dm`/glb, Draco compressed, KTX2 textures, 3D Tiles 1.0 & 1.1 implicit tiling via `.subtree`) load, refine by screen-space error and render.
 
-The `feat/globe` branch adds a digital-earth layer on the same kernel: `Globe3D`
+On top of the same kernel it also ships a **digital-earth layer**: `Globe3D`
 (ellipsoid surface / graticule / atmosphere), a quadtree imagery layer that places
 3D Tiles at true geodetic positions, a floating-origin camera (sub-millimetre
-resolvable motion at planet scale), and a runtime HUD (F3).
+resolvable motion at planet scale), and a runtime HUD (F3). Both scales are supported:
+regional tilesets on a plain ground frame, planet-scale on the globe. (The `no-globe`
+branch keeps the state from before the globe layer was folded in, for comparison.)
 
 This project does **not** use `cesium-native` or any Cesium code. It is an independent implementation of the 3D Tiles specification. (See [Credits](#credits) for the reference implementation used to pin down traversal semantics.)
 
 ## Registered nodes
 
-| Node | Purpose |
-|---|---|
-| `Tileset3D` | Loads a `tileset.json`, runs the traversal/load scheduler. Exposes the tile bounding boxes as a depth-coloured wireframe for debugging |
-| `Georeference3D` | Defines the render frame. Its transform carries the Z-up (tile) to Y-up (Godot) conversion |
-| `Godot3DTiles` | Version/build information |
-| `LongitudeLatitudeHeight` | Geodetic origin authority |
-| `EarthCenteredEarthFixed` | ECEF origin authority |
+| Node                      | Purpose                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `Tileset3D`               | Loads a `tileset.json`, runs the traversal/load scheduler. Exposes the tile bounding boxes as a depth-coloured wireframe for debugging |
+| `Georeference3D`          | Defines the render frame. Its transform carries the Z-up (tile) to Y-up (Godot) conversion                                             |
+| `Godot3DTiles`            | Version/build information                                                                                                              |
+| `LongitudeLatitudeHeight` | Geodetic origin authority                                                                                                              |
+| `EarthCenteredEarthFixed` | ECEF origin authority                                                                                                                  |
 
-`feat/globe` additionally registers:
+A digital-earth scene additionally uses these nodes (all on `main`):
 
-| Node | Purpose |
-|---|---|
-| `Globe3D` | Ellipsoid surface, graticule and atmosphere; rebases in O(1) on origin shift |
-| `GlobeTileLayer` | Quadtree imagery layer placing 3D Tiles at true geodetic positions |
-| `GlobeCameraController` | Orbit camera driving the floating-origin rebase |
+| Node                    | Purpose                                                                      |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `Globe3D`               | Ellipsoid surface, graticule and atmosphere; rebases in O(1) on origin shift |
+| `GlobeTileLayer`        | Quadtree imagery layer placing 3D Tiles at true geodetic positions           |
+| `GlobeCameraController` | Orbit camera driving the floating-origin rebase                              |
 
 ## Architecture
 
@@ -63,13 +65,13 @@ Traversal follows the REPLACE refinement rules, including the non-obvious ones: 
 
 ## Dependencies
 
-| Dependency | How it is obtained |
-|---|---|
-| [godot-cpp](https://github.com/godotengine/godot-cpp) `10.0.0-stable` | git submodule at `extern/godot-cpp` |
-| [GLM](https://github.com/g-truc/glm) 1.0.1 | fetched at configure time |
-| [nlohmann/json](https://github.com/nlohmann/json) v3.11.3 | fetched at configure time |
-| [Google Draco](https://github.com/google/draco) 1.5.7 | **vendored** in `extern/third_party/draco` (trimmed, Apache-2.0) |
-| [doctest](https://github.com/doctest/doctest) v2.4.11 | fetched at configure time, tests only |
+| Dependency                                                            | How it is obtained                                               |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| [godot-cpp](https://github.com/godotengine/godot-cpp) `10.0.0-stable` | git submodule at `extern/godot-cpp`                              |
+| [GLM](https://github.com/g-truc/glm) 1.0.1                            | fetched at configure time                                        |
+| [nlohmann/json](https://github.com/nlohmann/json) v3.11.3             | fetched at configure time                                        |
+| [Google Draco](https://github.com/google/draco) 1.5.7                 | **vendored** in `extern/third_party/draco` (trimmed, Apache-2.0) |
+| [doctest](https://github.com/doctest/doctest) v2.4.11                 | fetched at configure time, tests only                            |
 
 ### Why Draco is bundled
 
@@ -100,7 +102,12 @@ scripts\debug_build_install.bat
 
 `scripts\msvc_env.bat` locates Visual Studio via `vswhere` and activates the MSVC environment, so run the scripts from a plain terminal.
 
-For a release build use `configure_release.bat` / `release_build_install.bat`.
+For a release build use `configure_release.bat` / `release_build_install.bat`. That one
+targets Godot's **export template** (`GODOTCPP_TARGET=template_release`), which does not
+register editor-only API — the editor viewport will not fly to the dataset and the editor
+clip planes are not maintained. That is the runtime shape, not a broken build. To work in
+the editor *and* have `/O2` frame timings, use `windows-editor-release` (see the preset
+list below).
 
 ### Build (any platform, via presets)
 
@@ -110,7 +117,18 @@ cmake --build --preset windows-editor --parallel
 cmake --install build/windows-editor
 ```
 
-Available presets: `windows-editor`, `windows-release`, `linux-editor`, `linux-release`, `macOS-editor`, `macOS-release`. Windows is the actively developed and tested path.
+Available presets: `windows-editor`, `windows-editor-release`, `windows-release`, `linux-editor`, `linux-release`, `macOS-editor`, `macOS-release`. Windows is the actively developed and tested path.
+
+The two axes are independent: `GODOTCPP_TARGET` (`editor` / `template_release`) decides
+whether editor-only API is available, and `CMAKE_BUILD_TYPE` decides the optimisation level
+— and with it the library suffix and which `.gdextension` gets installed. `RelWithDebInfo`
+is rejected by `templates/CMakeLists.txt` (Debug or Release only).
+
+On a machine without reliable access to github.com, configuring a *second* build directory
+fails inside FetchContent (it keeps a source checkout per build directory and tries to
+re-clone GLM). `scripts\configure_release.bat` and `scripts\configure_editor_release.bat`
+reuse `build/windows-editor/_deps` instead; by hand, pass
+`-DFETCHCONTENT_SOURCE_DIR_GLM=<...>/glm-src` and the two equivalents.
 
 The install step writes the extension and its library to **`demo/addons`**, which is where the bundled `demo` project loads it from — so opening `demo/` in the editor picks up the freshly built plugin.
 

@@ -3,7 +3,7 @@
 // Tests for src/core/math/Mat4.h.
 //
 // The last two test cases are the important ones: they pin down the coordinate-frame
-// invariant from docs/REFACTOR_PLAN.md D1 (the root tile's worldMatrix must be the
+// invariant from docs/ARCHITECTURE.md D-1 (the root tile's worldMatrix must be the
 // identity in the scheduler's render frame) and quantify why the kernel must stay in
 // double precision.
 

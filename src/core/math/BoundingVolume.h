@@ -25,7 +25,7 @@ namespace tiles3d::math
     ///
     /// Unused trailing slots stay zero. A region is EPSG:4979 absolute geodetic
     /// coordinates and is deliberately *not* transformed by the tile's transform chain;
-    /// see docs/REFACTOR_PLAN.md D1 for how it reaches the render frame.
+    /// see docs/ARCHITECTURE.md D-1 for how it reaches the render frame.
     ///
     /// This layer is deliberately exception free. Godot itself is built with C++
     /// exceptions disabled, and godot-cpp's default GODOTCPP_DISABLE_EXCEPTIONS=ON adds

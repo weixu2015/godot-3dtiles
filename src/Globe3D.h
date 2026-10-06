@@ -3,7 +3,7 @@
 // Globe3D: a virtual Earth. Draws the WGS84 ellipsoid so 3D Tiles and other
 // geographically placed content have a surface to sit on.
 //
-// Architecture (docs/GLOBE_PLAN.md section 3): Globe3D does NOT own the coordinate
+// Architecture (docs/ARCHITECTURE.md 3.6): Globe3D does NOT own the coordinate
 // system. It resolves a Georeference3D upward, exactly the way Tileset3D does, so a
 // Globe3D and any number of Tileset3D nodes end up sharing one ECEF-to-local frame
 // simply by being siblings. There is no parent/child requirement in either direction -

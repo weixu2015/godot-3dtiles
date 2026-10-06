@@ -2,7 +2,7 @@
 //
 // GlobeCameraController: the trackball-style camera the globe reference page uses.
 //
-// Attach this to a Camera3D (docs/GLOBE_PLAN.md P3) - the camera is the thing that moves,
+// Attach this to a Camera3D (docs/ARCHITECTURE.md 2.2) - the camera is the thing that moves,
 // not the globe, which is the same split Cesium for Unity draws between its origin-shift
 // behaviour and the georeference.
 //

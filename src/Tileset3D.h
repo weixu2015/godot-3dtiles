@@ -5,7 +5,7 @@
 // Current stage: reads a tileset.json, builds the tile tree with the engine-agnostic
 // kernel, and visualises the tile bounding volumes as wireframes. Content (b3dm / glb
 // meshes and textures) is NOT rendered yet - that needs the traversal scheduler (phase 3)
-// and the content pipeline (phase 4) from docs/REFACTOR_PLAN.md.
+// and the content pipeline (docs/ARCHITECTURE.md 2.2 and 4).
 //
 // The wireframe is deliberate and not just a placeholder: it makes the whole frame chain
 // observable - parse, georeference, region conversion, world matrix accumulation - without
@@ -319,7 +319,7 @@ namespace tiles3d
 
         /// ECEF -> render frame. With a Georeference3D ancestor this is that node's
         /// ecef_to_local(); without one it is the implicit frame (ENU at the dataset's own
-        /// ECEF centre, Z-up flipped to Godot Y-up). See docs/REFACTOR_PLAN.md D1.
+        /// ECEF centre, Z-up flipped to Godot Y-up). See docs/ARCHITECTURE.md D-1.
         math::Mat4 compute_model_matrix() const;
 
         /// Strips a file:// prefix so Godot's FileAccess can open the result.
@@ -581,7 +581,7 @@ namespace tiles3d
         /// Prints the tile tree to the Godot console, `max_depth` levels deep.
         void dump_tree( int max_depth ) const;
 
-        /// Editor configuration warnings for rules ③ and ④ (see docs/REFACTOR_PLAN.md):
+        /// Editor configuration warnings for rules ③ and ④ (see docs/ARCHITECTURE.md 2.2):
         /// multiple Tileset3D without a shared Georeference3D, and nested Tileset3D. Must be
         /// public - the base Node declares it public and godot-cpp's register_virtuals needs
         /// access to bind it.

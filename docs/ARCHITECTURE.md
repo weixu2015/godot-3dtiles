@@ -8,26 +8,34 @@
 
 ### 1.1 面向的场景
 
-**以单个 3D Tiles 数据集为主体的区域级数字孪生应用。** 典型项目形态是：
-一块园区、工程或城市级的实景三维 / 倾斜摄影数据，空间范围通常在几平方公里到几十平方公里；城市级项目可达几十到几百平方公里，但空间跨度一般不超过几十公里。
+**以 3D Tiles 数据集为主体的实景三维渲染与数字孪生应用。** 两个尺度都在支持范围内：
 
-该数据集作为场景主体，用于展示、交互，并叠加 BIM、矢量、POI、传感器等业务图层。
+| 场景         | 典型形态                                                                                     | 规模                                                 |
+| ------------ | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| **区域级**   | 园区 / 工程 / 城市级实景三维与倾斜摄影作为场景主体，叠加 BIM、矢量、POI、传感器等业务图层     | 几平方公里到几百平方公里，空间跨度一般不超过几十公里 |
+| **全球尺度** | 数字地球：多数据集同时在线，按真实经纬度落在椭球面上，配行星级影像、大气与太阳                 | 行星级                                               |
 
-本项目不面向“全球尺度、多数据集同时在线”的数字地球。**主分支不包含 `Globe3D`**，Globe 相关能力作为实验分支或未来扩展。
+两条路线共用同一个 `src/core/` 调度内核与内容管线，差别只在上面那层壳：区域级直接用地表 ENU 帧；
+全球尺度加 `Globe3D` 椭球地表与 **floating origin**（重定世界原点，见 §3.6）。
 
-> 注意：区域级场景仍需正确处理 `RTC_CENTER` / `tileset.transform` 与局部坐标转换，避免 ECEF 大坐标直接进入单精度渲染管线；但通常不需要 Globe 级的 Origin Shift 或双精度引擎。
+> 无论哪个尺度，都必须正确处理 `RTC_CENTER` / `tileset.transform` 与局部坐标转换，避免 ECEF
+> 大坐标直接进入单精度渲染管线。区域级通常不需要 Origin Shift；全球尺度必须要。
 
 ### 1.2 分支分工与 globe 现状
 
-| 分支          | 定位                                                                 |
-| ------------- | -------------------------------------------------------------------- |
-| `main`        | 单数据集数字孪生基座，不含 `Globe3D`                                 |
-| `feat/globe`  | 数字地球能力，与 `main` 共享 `src/core/` 内核                       |
+| 分支       | 定位                                                                         |
+| ---------- | ---------------------------------------------------------------------------- |
+| `main`     | **主线**：调度内核 + 内容管线 + 数字地球层（`Globe3D` 等），一起维护、一起发布 |
+| `no-globe` | 2026-10-06 从主线之前的状态分出的**存档线**，保留作对照，不在其上继续开发     |
 
-`feat/globe` 已落地（不再是计划）：`Globe3D` 椭球地表 + 影像四叉树（ECT 方案）+
-大气/太阳/经纬网 + 轨道相机 + **floating origin**（重定世界原点，亚毫米可分辨）+
-运行时 HUD。3D Tiles 以 `GlobeTileLayer` 形式按真实经纬度落在椭球面上。
-两边共享同一个 `src/core/`，`Globe3D` 上线后合并回主分支的成本可控。
+`main` 上的数字地球层：`Globe3D` 椭球地表 + 影像四叉树（ECT 方案）+ 大气/太阳/经纬网 +
+轨道相机 + **floating origin**（重定世界原点，亚毫米可分辨）+ 运行时 HUD。3D Tiles 以
+`GlobeTileLayer` 形式按真实经纬度落在椭球面上。
+
+> 历史：数字地球原先在 `feat/globe` 分支开发（fork 自 `380a5f3`），2026-10-06 该分支被
+> **提升为 `main`**，旧 `main` 改名为 `no-globe`。当时两条线处于分叉状态（39 vs 5 笔提交）；
+> `no-globe` 独有的 5 笔功能已全部在主线（其中三笔以 `cherry-pick -x` 落地），因此**不需要合并**，
+> `no-globe` 只作对照与追溯。（决策见 §7 D-23）
 
 ### 1.3 功能范围（明确不做）
 
@@ -35,7 +43,7 @@
 | ---------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `pnts` / `i3dm` / `cmpt`                             | 本项目的实际数据源（Cesium ion 摄影测量管线、geotwin 转换产物）不产出这些格式 |
 | 3D Tiles 样式引擎（`tileset.json` 的 `styles`）      | 业务着色在 Godot 侧用材质做，更直接                                           |
-| 全局优先级请求调度                                   | 单数据集场景下请求量可控，按遍历顺序即可                                      |
+| 跨数据集的全局请求仲裁                               | 单个数据集内的加载优先级已按遍历顺序 + 视锥中心度排序（`LoadPriority`）；多数据集争带宽的仲裁不做 |
 | 瓦片元数据（`EXT_structural_metadata` 等）的完整解析 | 仅解析到不影响渲染的程度                                                      |
 
 ---
@@ -89,7 +97,7 @@
 | `GodotMathConvert.h`      | **唯一的** double→float 窄化点                                            |
 | `FileHelper.cpp`          | 本地文件与 URL 读取                                                       |
 
-`feat/globe` 额外的 Godot 层：
+`main` 上的数字地球层（同属 `src/`）：
 
 | 文件                              | 职责                                                                                     |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -98,7 +106,7 @@
 | `GlobeTile.{h,cpp}`               | 单瓦片 mesh 与外观源（`rtc_center_ecef`）                                               |
 | `GlobeCameraController.{h,cpp}`   | 轨道相机 + `update_origin_shift()` 驱动（所有 pose writer 之后、clip 之前）              |
 | `GlobeAtmosphereShading.{h,cpp}`  | 大气/地面 shader（display space 全程 + 输出端显式 encode，见 §4.5）                      |
-| `core/ellipsoid/GlobeQuadtree`    | ECT 瓦片方案、SSE、地平线剔除（`EllipsoidalOccluder`）                                   |
+| `core/math/EllipsoidalOccluder`   | 地平线剔除（球面遮挡）；ECT 瓦片方案与 SSE 在 `GlobeTileLayer` 内                        |
 
 ---
 
@@ -163,7 +171,7 @@ contentRoot.transform = <up-axis correction>，origin = RTC_CENTER
 ### 3.6 globe 帧约定：Y-up ECEF 作者化 + floating origin
 
 **误差定律**：float32 渲染的误差 ≈（那个"大数"的量级）× 2⁻²⁴。唯一目标是把大数从
-"离地心 6.4e6 m"换成"离相机多远"。§3.2 的 ENU 帧解决单数据集；globe 的全球场景用
+"离地心 6.4e6 m"换成"离相机多远"。§3.2 的 ENU 帧解决区域级场景；全球尺度用
 **floating origin（重定世界原点）**：
 
 - `GlobeCameraController::update_origin_shift()` 在相机位移超过阈值（默认 1000 m）时
@@ -348,7 +356,7 @@ Bing 味的只有那个**默认字符串**，它是默认值不是依赖。
 | 编译器 | C++20。Windows 用 MSVC（**VS 2022 Community，MSVC 14.36.32532**） |
 | SDK    | Windows SDK **10.0.22621.0**                                      |
 | 生成器 | **Ninja（单配置）**                                               |
-| CMake  | 3.22+                                                             |
+| CMake  | 3.22+；**用预设需 3.23+**（`CMakePresets.json` 是 preset schema v5）                                                             |
 | Python | 3.x（godot-cpp 绑定生成器需要）                                   |
 
 > MSVC 与 SDK 版本必须与 `build/windows-editor/CMakeCache.txt` 一致 —— CMake 缓存了编译器
@@ -375,6 +383,26 @@ ctest --preset windows-editor
 
 安装步骤把扩展与动态库写进 **`demo/addons`**，`demo/` 项目从这里加载 ——
 所以在编辑器里打开 `demo/` 就能用上新构建的插件。
+**三种构建组合，选错会"看起来功能被裁掉了"**：godot-cpp 的 `GODOTCPP_TARGET`
+（`editor` / `template_release`）决定**编辑器专用 API 是否可用**；`CMAKE_BUILD_TYPE` 决定
+**优化级别**，并顺带决定库名后缀（`-d`）与装哪个 `.gdextension` 模板。两者**正交**：
+
+| 预设                     | 目标     | 优化 | 用途                                             |
+| ------------------------ | -------- | ---- | ------------------------------------------------ |
+| `windows-editor`         | editor   | 否   | 断点调试、看断言与警告                           |
+| `windows-editor-release` | editor   | 是   | **日常在编辑器里调场景**（视口正常 + 帧率有意义） |
+| `windows-release`        | template | 是   | 发行运行时（导出模板）的性能对比                 |
+
+> `windows-release` 用 `template_release` ⇒ 不定义 `TILES3D_EDITOR_TARGET` ⇒
+> **编辑器视口不会自动飞到数据集**、编辑器裁剪面也不维护
+> （`GlobeTileLayer::apply_editor_framing` 整段被编掉）。这不是 globe 坏了，而是发行目标里
+> 没有编辑器 API。要在编辑器里看效果就用 `windows-editor-release`（见 §7 D-24）。
+> 另外 `templates/CMakeLists.txt` 只接受 `Debug` / `Release`，**`RelWithDebInfo` 会直接 FATAL_ERROR**。
+>
+> `scripts\configure_release.bat` 在无网络环境下会失败在 FetchContent 上 —— FetchContent
+> **每个构建目录各存一份源码**，第二次配置会重新 clone glm。该脚本已内置复用
+> `build/windows-editor/_deps` 已有源码的逻辑；手工配置时传
+> `-DFETCHCONTENT_SOURCE_DIR_GLM=<...>/glm-src` 等三个变量即可。
 
 `scripts\msvc_env.bat` 用 `vswhere` 定位 Visual Studio 并激活 MSVC 环境。
 **该脚本在受限/沙箱环境里会失败**：安全策略把 **`reg.exe` 列入程序黑名单**，而
@@ -400,9 +428,9 @@ build/windows-editor/tests/tiles3d_tests.exe            # 全量
 build/windows-editor/tests/tiles3d_tests.exe -tc="*geomath*"   # 按用例名过滤
 ```
 
-**基线提示**：全量 **111 例，105 过 / 6 败**，失败全部集中在 `test_gltf_reader.cpp`
-（历史遗留红线，6 用例）。判断"是不是我改坏了"时，必须与该基线对照（失败数与位置完全
-一致即零回归），而不是假定全绿。
+**基线提示**：全量 **111 例全绿**（2026-10-06 起，含 `test_gltf_reader.cpp`）。
+**因此任何失败都是回归** —— 不存在"几例是既有的失败"这种放行条件。历史上确实有过 6 例
+`test_gltf_reader` 失败，那是已经修掉的旧基线，不要再拿它当挡箭牌。
 
 ### 5.4 真机渲染自测
 
@@ -423,6 +451,29 @@ build/windows-editor/tests/tiles3d_tests.exe -tc="*geomath*"   # 按用例名过
 
 探针用 `-s res://<script>.gd` 直跑。审计脚本用 `get_tree().quit()` 自终止。
 **不要把编辑器（`-e`）留在前台等** —— 它会永久阻塞。
+
+---
+
+
+### 5.5 运行时调试开关（环境变量）
+
+调试与度量都走环境变量：不写进场景、不依赖编辑器，因此可脚本复现。
+
+| 变量                              | 作用                                                                                   |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| `TILES3D_TIMING=1`                | 每秒打印一行分阶段耗时（traverse / 其中几何块 / loads / visibility / rebase / 调用次数） |
+| `GLOBE_DATASET=<子串>`            | 启动即加载匹配的数据集，绕开 picker —— 切换数据集是最慢也最容易坏的路径                 |
+| `GLOBE_PERF_SWEEP=1`              | 脚本化持续缩放，作为可复现的性能负载（手拖鼠标的负载无法复测）                          |
+| `ST_STATS=1`（`single_tileset`）  | 每秒打印帧时间**分位数** p50/p90/p99/max                                                |
+| `ST_MOTION=1`                     | 正弦驱动同一套鼠标手势（tilt + 滚轮），让"运动中"的帧率可脚本捕获                        |
+| `ST_LOADS=<n>` / `ST_UPLOADS=<n>` | 覆盖并发加载数 / 每帧装配数                                                             |
+| `ST_HIDE=1`                       | 隐藏瓦片子树，测"引擎 + 场景"的地板帧时间                                               |
+| `ST_SHOT=<png>` `ST_SHOT_AT=<秒>` | 引擎内抓 viewport 存 PNG 后退出（桌面枚举不到 Godot 窗口时唯一的取图手段）              |
+
+> **性能结论必须来自这些数字，不能靠观感。** 实例：一轮"1 秒平均 113 fps"的采样，实际帧时间是
+> `p50 27.95 / max 45 ms`，主因是 HUD 每帧调用 `RenderingServer.get_rendering_info()`
+> （向渲染器查询，不是读计数器）。所以看分位数、不看平均值；度量时加 `--disable-vsync`，
+> 否则读到的是刷新率。
 
 ---
 
@@ -575,7 +626,7 @@ georeferenced。`Aerometrex-SanFrancisco-2cm` 的根是 `sphere`，其中心长�
 | D-12 | Draco 引入方式              | **vendored Google Draco 1.5.7**，在 `GltfReader` 内直接解码为 SoA 顶点，不重序列化 GLB      | 2026-09-17 |
 | D-13 | KTX2 支持                   | 自持 basisu transcoder + zstd，进 Godot 前转 RGBA8                                          | 2026-10-03 |
 | D-14 | 隐式地理参考判定            | **声明式**（`region` 或声明的 `transform`），禁止数值启发式（理由见 §6.1）                  | 2026-10-03 |
-| D-15 | 主分支是否包含 globe        | **不含**。主分支面向单数据集小范围场景；`Globe3D` 在 `feat/globe` 分支（理由见 §1.2）       | 2026-10-03 |
+| D-15 | 主分支是否包含 globe        | ~~**不含**~~ —— **已被 D-23 推翻**。原判断：主分支面向单数据集小范围场景，`Globe3D` 留在 `feat/globe` | 2026-10-03 |
 | D-16 | globe 精度方案              | **floating origin**（重定世界原点），不做 GPU RTE 路线；阈值 1000 m 可调（见 §3.6）         | 2026-10-03 |
 | D-17 | `Globe3D` mesh 顶点域       | **Y-up ECEF 作者化**（rebase O(1)）；瓦片保持 RTC 精确域（见 §3.6）                          | 2026-10-04 |
 | D-18 | 渲染器                      | **钉死 `gl_compatibility`**（大气 display space 显式 encode，Forward+ 会双重 encode，见 §4.5） | 2026-10-04 |
@@ -583,6 +634,9 @@ georeferenced。`Aerometrex-SanFrancisco-2cm` 的根是 `sphere`，其中心长�
 | D-20 | 运行时 HUD                  | 程序化创建（`globe_hud.gd`），不做编辑器插件——运行窗口需要，编辑器不需要                     | 2026-10-04 |
 | D-21 | 影像层命名                  | **不叫 `BingMapLayer`**。该层无任何 Bing 专有逻辑，Bing 味只在默认 URL 模板；改名只应往 provider 中性走（`GlobeRasterLayer`），理由见 §4.6 | 2026-10-04 |
 | D-22 | 影像源扩展路线（WMS/TMS）    | **先抽地址层再加 scheme**：默认 `Quadkey` 保持现状 → XYZ/TMS 几乎零成本 → WMS 必须先换掉 404 门控（改为"试过没有"的有界 LRU），见 §4.6 | 2026-10-04 |
+| D-23 | 主分支改为数字地球线        | `feat/globe` **提升为 `main`**，旧 `main` 改名 `no-globe` 存档；不再保留"单数据集"定位（推翻 D-15） | 2026-10-06 |
+| D-24 | 构建组合                    | `GODOTCPP_TARGET`（editor/template）与 `CMAKE_BUILD_TYPE` **正交**；新增 `windows-editor-release`，让编辑器视口与 `/O2` 兼得（见 §5.2） | 2026-10-06 |
+| D-25 | globe 是否做编译开关        | **不做**。实测 globe 只让 dll 增 390 KB（2.17 MB 的 17.5%），不值得多养一个必须持续构建的配置；`no-globe` 分支已提供"无 globe"形态 | 2026-10-06 |
 
 **D-9 的理由**：Godot 自身以禁用 C++ 异常的方式构建；godot-cpp 的默认
 `GODOTCPP_DISABLE_EXCEPTIONS=ON` 会给消费者加 `_HAS_EXCEPTIONS=0`。在这条链接链上的库靠
@@ -596,7 +650,8 @@ georeferenced。`Aerometrex-SanFrancisco-2cm` 的根是 `sphere`，其中心长�
 
 改动涉及坐标 / 帧 / 内容装配后，按顺序跑：
 
-1. **单测**：`tests/tiles3d_tests.exe`，并与 §5.3 的基线对照（6 例失败是既有的）。
+1. **单测**：`tests/tiles3d_tests.exe`。§5.3 的基线是**全绿**，所以任何失败都是回归；
+   与改动前对照时看的是"失败数是否从 0 变成非 0"，而不是"数目是否和以前一样"。
 2. **全数据集审计**（本地 QA harness）：要求
    **`is_finite` 错误 = 0、`ERROR` 计数 = 0、`fail = 0`**。
 3. **代表性截图**：渲染输出应能看到真实几何
@@ -604,7 +659,7 @@ georeferenced。`Aerometrex-SanFrancisco-2cm` 的根是 `sphere`，其中心长�
    量 patch 均值不量单像素，断言要配"已知会失败"的负向对照。
 4. **零回归对照**：改动前后用 `git stash` 暂存 `src/` `tests/`，重建跑基线，
    比对失败数与位置是否完全一致。
-5. **globe 侧**（feat/globe）：`demo/origin_shift_probe.gd` 验证重定原点后的
+5. **globe 侧**：`demo/_probe_archive/origin_shift_probe.gd`（本地探针归档，不进 git）验证重定原点后的
    最小可分辨位移（锚点在数据集 0.0001 m）；`GLOBE_NO_ORIGIN_SHIFT=1` 负对照下
    开/关应逐像素一致。测"最小可分辨位移"必须沿最粗的那个分量。
 

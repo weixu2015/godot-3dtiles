@@ -5,7 +5,7 @@
 // Everything here is double precision, on purpose. Godot's real_t / Vector3 is float32
 // by default, which resolves only ~0.5 m at ECEF magnitudes (6.4e6 m) and visibly
 // jitters photogrammetry. The kernel therefore works in double and converts to
-// Godot's float types only at the boundary. See docs/REFACTOR_PLAN.md D1, and
+// Godot's float types only at the boundary. See docs/ARCHITECTURE.md D-1, and
 // tests/test_mat4.cpp for the measured residual that backs this up.
 
 #ifndef TILES3D_CORE_MATH_TYPES_H

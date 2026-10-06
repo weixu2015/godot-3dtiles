@@ -799,7 +799,7 @@ namespace tiles3d
         // list is short, a shift is rare, and a registry is one more thing to forget to update
         // when a new content node type lands. Everything that authors geometry in the frame's
         // local space hangs off the Georeference3D - that is the whole point of the shared
-        // frame (docs/GLOBE_PLAN.md 3).
+        // frame (docs/ARCHITECTURE.md 3.6).
         godot::Node3D *carrier = const_cast<godot::Node3D *>( resolve_frame_node() );
         if ( carrier == nullptr )
         {

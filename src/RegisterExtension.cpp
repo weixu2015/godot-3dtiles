@@ -42,20 +42,20 @@ namespace
 
         // The georeference and the tileset node. Tileset3D currently parses a tileset and
         // draws its bounding volumes as wireframes; content rendering arrives with phases 3
-        // and 4 of docs/REFACTOR_PLAN.md.
+        // and 4 of docs/ARCHITECTURE.md.
         godot::ClassDB::register_class<Georeference3D>();
         godot::ClassDB::register_class<TilesetContentLoader>();
         godot::ClassDB::register_class<Tileset3D>();
 
         // The virtual Earth. Globe3D resolves the georeference the same way Tileset3D does,
-        // so it is a sibling of the tilesets rather than their parent (docs/GLOBE_PLAN.md 3).
+        // so it is a sibling of the tilesets rather than their parent (docs/ARCHITECTURE.md 2.2).
         godot::ClassDB::register_class<Globe3D>();
 
         // Trackball camera for the globe. It extends Camera3D so a scene can use it in place
-        // of a plain camera (docs/GLOBE_PLAN.md P3).
+        // of a plain camera (docs/ARCHITECTURE.md 2.2).
         godot::ClassDB::register_class<GlobeCameraController>();
 
-        // Streaming imagery quadtree for the globe surface (docs/GLOBE_PLAN.md P1).
+        // Streaming imagery quadtree for the globe surface (docs/ARCHITECTURE.md 4.6).
         godot::ClassDB::register_class<GlobeTileLayer>();
     }
 
