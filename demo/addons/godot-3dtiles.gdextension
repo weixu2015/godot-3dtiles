@@ -1,9 +1,9 @@
 [configuration]
 entry_symbol = "GDExtensionInit"
 compatibility_minimum = "4.7"
-reloadable = true
+reloadable = false
 
 [libraries]
-linux.x86_64 = "res://addons/lib/Linux-x86_64/godot-3dtiles-d.so"
-macos = "res://addons/lib/Darwin-universal/godot-3dtiles-d.dylib"
-windows.x86_64 = "res://addons/lib/Windows-AMD64/godot-3dtiles-d.dll"
+linux.x86_64 = "res://addons/lib/Linux-x86_64/godot-3dtiles.so"
+macos = "res://addons/lib/Darwin-universal/godot-3dtiles.dylib"
+windows.x86_64 = "res://addons/lib/Windows-AMD64/godot-3dtiles.dll"
