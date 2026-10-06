@@ -2,7 +2,7 @@
 
 A Godot 4.7 GDExtension that loads and renders [OGC 3D Tiles](https://github.com/CesiumGS/3d-tiles) directly — **no cesium-native dependency**.
 
-The plugin is a self-contained C++20 implementation: an engine-agnostic scheduling kernel plus a thin Godot layer. It reads `tileset.json`, walks the tile tree with screen-space-error refinement, fetches `b3dm` payloads, decodes Draco-compressed meshes and assembles them into Godot nodes.
+The plugin is a self-contained C++20 implementation: an engine-agnostic scheduling kernel plus a thin Godot layer. It reads `tileset.json`, walks the tile tree with screen-space-error refinement, fetches `b3dm`/glb payloads, decodes Draco-compressed meshes and assembles them into Godot nodes.
 
 ![Demo](screenshot.webp)
 
@@ -106,7 +106,7 @@ For a release build use `configure_release.bat` / `release_build_install.bat`. T
 targets Godot's **export template** (`GODOTCPP_TARGET=template_release`), which does not
 register editor-only API — the editor viewport will not fly to the dataset and the editor
 clip planes are not maintained. That is the runtime shape, not a broken build. To work in
-the editor *and* have `/O2` frame timings, use `windows-editor-release` (see the preset
+the editor _and_ have `/O2` frame timings, use `windows-editor-release` (see the preset
 list below).
 
 ### Build (any platform, via presets)
@@ -124,7 +124,7 @@ whether editor-only API is available, and `CMAKE_BUILD_TYPE` decides the optimis
 — and with it the library suffix and which `.gdextension` gets installed. `RelWithDebInfo`
 is rejected by `templates/CMakeLists.txt` (Debug or Release only).
 
-On a machine without reliable access to github.com, configuring a *second* build directory
+On a machine without reliable access to github.com, configuring a _second_ build directory
 fails inside FetchContent (it keeps a source checkout per build directory and tries to
 re-clone GLM). `scripts\configure_release.bat` and `scripts\configure_editor_release.bat`
 reuse `build/windows-editor/_deps` instead; by hand, pass
