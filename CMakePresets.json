@@ -58,6 +58,16 @@
             }
         },
         {
+            "name": "windows-editor-release",
+            "displayName": "Windows x64 - editor target, optimized",
+            "description": "The editor target with Release optimization: the editor viewport, the automatic framing and the editor clip planes stay compiled in, and the code is built with /O2. The two axes are independent - GODOTCPP_TARGET decides whether editor-only API is available, CMAKE_BUILD_TYPE decides the optimization level and, with it, the library suffix and which .gdextension template is generated. templates/CMakeLists.txt rejects anything but Debug or Release, so RelWithDebInfo is not an option here.",
+            "inherits": "windows-editor",
+            "binaryDir": "${sourceDir}/build/windows-editor-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
             "name": "linux-editor",
             "displayName": "Linux x64 - editor",
             "inherits": "default",
@@ -124,6 +134,10 @@
             "configurePreset": "windows-release"
         },
         {
+            "name": "windows-editor-release",
+            "configurePreset": "windows-editor-release"
+        },
+        {
             "name": "linux-editor",
             "configurePreset": "linux-editor"
         },
@@ -151,6 +165,13 @@
         {
             "name": "windows-release",
             "configurePreset": "windows-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "windows-editor-release",
+            "configurePreset": "windows-editor-release",
             "output": {
                 "outputOnFailure": true
             }
